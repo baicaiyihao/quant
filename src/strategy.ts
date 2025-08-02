@@ -814,10 +814,14 @@ export class Strategy {
             logger.error(`OnChainCalls库测试失败，但继续运行...`);
         }
         
+        // 获取间隔时间（毫秒），默认10秒
+        const intervalMs = parseInt(process.env.STRATEGY_INTERVAL_MS || '10000');
+        console.log(`使用间隔时间: ${intervalMs}ms`);
+        
         // noinspection InfiniteLoopJS
         while (true) { // 无限循环
             await this.core(); // 等待 fetchData 完成
-            await new Promise(resolve => setTimeout(resolve, 10000)); // 等待10秒
+            await new Promise(resolve => setTimeout(resolve, intervalMs));
         }
     }
 
