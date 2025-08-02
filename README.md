@@ -17,8 +17,11 @@
 # 钱包私钥 需要替换
 PRIVATE_KEY="你的私钥"
 
-# Sui节点URL，替换成你的，这里仅测试
+# Sui节点URL，支持多个RPC端点进行负载均衡
 ENDPPOINT="https://go.getblock.io/fb5b37a5687249e089aa7c21e2ea10"
+ENDPPOINT1="https://another-rpc-endpoint.com"
+ENDPPOINT2="https://third-rpc-endpoint.com"
+# 可以继续添加更多端点 ENDPPOINT3, ENDPPOINT4 等
 
 # 目标交易POLL地址，仅测试，具体POOL自己筛选
 POOL_ID="0x9b1a3eb1538cbb0402b009e4e2e39aecd4d97dbe80791c5c1fb6644b0bff2688"
@@ -39,6 +42,16 @@ SLIPPAGE=0.05
 # 配平误差 (0-1之间，默认0.1表示10%)
 BALANCE_ERROR=0.1
 ```
+
+### RPC端点负载均衡说明
+
+系统现在支持多个RPC端点进行负载均衡，具有以下特性：
+
+1. **自动轮询**: 系统会自动轮换使用配置的RPC端点
+2. **失败检测**: 当某个端点连续失败3次后，会自动停用该端点
+3. **指数退避**: 停用的端点会使用指数退避算法逐步增加重试间隔
+4. **自动恢复**: 当退避时间到达后，端点会自动重新激活
+5. **故障转移**: 当前端点失败时，会立即切换到下一个可用端点
 
 配置文件完成后，你需要在你的钱包中充值一部分资产，具体跟你选择的Pool有关，比如池子`A/B`，那么你需要至少任意一种资产（`A`或者`B`）不小于0。
 
@@ -67,7 +80,13 @@ npm install && tsc && node dist/index.js
 ```bash
 # 必需配置
 PRIVATE_KEY="你的私钥"
-ENDPPOINT="https://your-sui-rpc-endpoint"
+
+# 多个RPC端点配置（负载均衡）
+ENDPPOINT="https://your-primary-sui-rpc-endpoint"
+ENDPPOINT1="https://your-backup-sui-rpc-endpoint"
+ENDPPOINT2="https://your-third-sui-rpc-endpoint"
+# 可继续添加更多...
+
 POOL_ID="目标池子地址"
 G=0
 
@@ -83,9 +102,20 @@ BALANCE_ERROR=0.1
 ### 必需参数
 
 - **PRIVATE_KEY**: 钱包私钥
-- **ENDPPOINT**: Sui RPC节点地址
+- **ENDPPOINT**: 主要Sui RPC节点地址
+- **ENDPPOINT1, ENDPPOINT2, ...**: 备用RPC节点地址（可选，建议配置多个以提高稳定性）
 - **POOL_ID**: 目标交易池地址
 - **G**: 偏移量参数，控制开仓区间的偏移
+
+### RPC负载均衡配置
+
+系统会自动检测所有以 `ENDPPOINT` 开头的环境变量：
+- `ENDPPOINT`: 主要端点
+- `ENDPPOINT1`: 第一个备用端点
+- `ENDPPOINT2`: 第二个备用端点
+- 依此类推...
+
+建议配置至少2-3个不同的RPC端点以确保系统稳定性。
 
 ### 可选策略参数
 
@@ -153,4 +183,5 @@ BALANCE_ERROR=0.1
 2. 资金使用率不应超过1.0
 3. 滑点和配平误差建议保持在合理范围内
 4. 最小区间倍数建议不小于1
-5. 修改配置后需要重启程序才能生效 
+5. 修改配置后需要重启程序才能生效
+6. **强烈建议配置多个RPC端点以提高系统稳定性和容错能力**

@@ -7,6 +7,7 @@ import {logger} from "./Logger";
 import {calTickIndex, coinTypeToName, scalingDown, stringToDividedNumber} from "./utils";
 import {getStrategyConfig, setStrategyConfig, StrategyConfig} from "./strategy-config";
 import {fetchHistoricalPriceData, displayPoolChart} from "./analyze";
+import {createBalancedSuiClient} from "./rpc-balancer";
 
 
 /**
@@ -39,7 +40,7 @@ export class Strategy {
 
     constructor(endpoint: string, privateKey: string, poolId: string, g: number, strategyConfig?: Partial<StrategyConfig>) {
         this.poolId = poolId;
-        this.client = new SuiClient({url: endpoint});
+        this.client = createBalancedSuiClient(); // 使用负载均衡的客户端
         this.G = g
         
         // 设置策略配置
@@ -663,6 +664,10 @@ export class Strategy {
      * 核心启动器
      */
     async core() {
+        // 每次核心循环都重新获取负载均衡的客户端
+        this.client = createBalancedSuiClient();
+        logger.info(`重新获取负载均衡RPC客户端`);
+        
         // 获取当前仓位
         const positions = await this.getUserPositions(this.walletAddress)
         if (positions === null) {
