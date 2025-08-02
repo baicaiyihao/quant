@@ -8,8 +8,6 @@ config();
 
 async function main() {
     const private_key = process.env.PRIVATE_KEY as string;
-    logger.info(`ENV: private_key:${private_key}`);
-
     // 初始化RPC负载均衡器
     const rpcBalancer = getRPCLoadBalancer();
     logger.info('RPC Load Balancer Status:', rpcBalancer.getStatus());

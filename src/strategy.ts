@@ -54,7 +54,7 @@ export class Strategy {
             this.keyPair = Ed25519Keypair.fromSecretKey(Buffer.from(privateKey, 'hex'));
         }
         this.walletAddress = this.keyPair.toSuiAddress();
-        logger.info(`walletAddress:${this.walletAddress}`);
+        logger.info(`ENV: walletAddress:${this.walletAddress}`);
         
         // 打印配置信息
         const config = getStrategyConfig();
