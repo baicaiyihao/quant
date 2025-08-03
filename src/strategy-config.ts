@@ -7,6 +7,10 @@ export interface StrategyConfig {
     slippage: number;
     // 配平误差 (0-1之间，默认0.1表示10%)
     balanceError: number;
+    // 奖励监测配置 (格式: "TOKEN1>1.1orTOKEN2>1.2")
+    rewardsConfig: string;
+    // 区间扩大倍数 (用于连续突破时的指数退避，默认2)
+    rangeExpansionMultiplier: number;
 }
 
 // 默认配置
@@ -14,7 +18,9 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
     fundUsageRate: 0.9,        // 90%资金使用率
     minRangeMultiplier: 3,      // 3倍tickSpacing
     slippage: 0.05,            // 5%滑点
-    balanceError: 0.1           // 10%配平误差
+    balanceError: 0.1,          // 10%配平误差
+    rewardsConfig: "",
+    rangeExpansionMultiplier: 2 // 区间扩大倍数，用于指数退避
 };
 
 // 全局配置实例

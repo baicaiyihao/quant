@@ -129,38 +129,27 @@ if (historicalData && historicalData.bars && historicalData.bars.length > 0) {
     plotLines.push('═'.repeat(plotLines[0].length));
     }
 
-    // 添加图例说明
-    logger.renderMarkdown('**图表说明:**');
-    logger.renderMarkdown('- 绿色线条: 价格走势');
-    logger.renderMarkdown('- ═══ 横线: LP Position区间边界');
-    logger.renderMarkdown(`- 时间范围: ${startTimeStr} - ${endTimeStr} (2小时)`);
-    logger.renderMarkdown(`- 价格范围: ${minPrice.toFixed(6)} - ${maxPrice.toFixed(6)} (波动: ${(priceRange / minPrice * 100).toFixed(2)}%)`);
-
     // 输出图表
-    logger.renderMarkdown('```');
     logger.renderMarkdown(plotLines.join('\n'));
-    logger.renderMarkdown('```');
-    
-    // 显示价格信息
-    logger.renderMarkdown(`**当前价格:** \`${currentPriceAdjusted.toFixed(6)}\``);
-    logger.renderMarkdown(`**Position区间:** \`${positionRange.lower.toFixed(6)} - ${positionRange.upper.toFixed(6)}\` (±0.20%)`);
-    
-    if (historicalData.latestPrice) {
-    const priceChange = ((currentPriceAdjusted - historicalData.latestPrice) / historicalData.latestPrice * 100);
-    logger.renderMarkdown(`**24h价格变化:** ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%`);
-    }
     
     // 分析价格是否在position区间内
     const isInRange = currentPriceAdjusted >= positionRange.lower && currentPriceAdjusted <= positionRange.upper;
-    logger.renderMarkdown(`**Position状态:** ${isInRange ? '✅ 在区间内' : '⚠️ 超出区间'}`);
+    
+    // 创建表格展示关键信息
+    const headers = ['**指标**', '**数值**'];
+    const rows = [
+      ['**时间范围**', `\`${startTimeStr} - ${endTimeStr}\``],
+      ['**价格范围**', `\`${minPrice.toFixed(6)} - ${maxPrice.toFixed(6)}\``],
+      ['**当前价格**', `\`${currentPriceAdjusted.toFixed(6)}\``],
+      ['**Position区间**', `\`${positionRange.lower.toFixed(6)} - ${positionRange.upper.toFixed(6)}\``],
+      ['**Position状态**', isInRange ? '✅ 在区间内' : '⚠️ 超出区间']
+    ];
+    
+    logger.renderTable(headers, rows);
     
 } else {
     // 如果没有历史数据，显示静态分析
-    logger.renderMarkdown(`**当前价格:** \`${currentPrice.toFixed(6)}\``);
-    logger.renderMarkdown(`**Position区间:** \`${positionRange.lower.toFixed(6)} - ${positionRange.upper.toFixed(6)}\` (±0.20%)`);
-    
     const isInRange = currentPrice >= positionRange.lower && currentPrice <= positionRange.upper;
-    logger.renderMarkdown(`**Position状态:** ${isInRange ? '✅ 在区间内' : '⚠️ 超出区间'}`);
     
     // 创建简单的ASCII图表作为fallback
     const height = 10;
@@ -194,19 +183,19 @@ if (historicalData && historicalData.bars && historicalData.bars.length > 0) {
         chart.push(line);
     }
     
-    logger.renderMarkdown('**简化价格图表 (无历史数据):**');
-    logger.renderMarkdown('```');
+    logger.renderHeading(3, '**简化价格图表 (无历史数据):**');
     logger.renderMarkdown(chart.join('\n'));
-    logger.renderMarkdown('```');
-    logger.renderMarkdown('*说明: ●=当前价格, ═=区间边界, ─=区间内*');
+    
+    // 创建表格展示关键信息
+    const headers = ['**指标**', '**数值**'];
+    const rows = [
+      ['**时间范围**', '`无历史数据`'],
+      ['**价格范围**', `\`${minPrice.toFixed(6)} - ${maxPrice.toFixed(6)}\``],
+      ['**当前价格**', `\`${currentPrice.toFixed(6)}\``],
+      ['**Position区间**', `\`${positionRange.lower.toFixed(6)} - ${positionRange.upper.toFixed(6)}\``],
+      ['**Position状态**', isInRange ? '✅ 在区间内' : '⚠️ 超出区间']
+    ];
+    
+    logger.renderTable(headers, rows);
 }
-
-logger.renderHeading(3, '💡 建议');
-logger.renderList([
-    '📊 图表中绿色线条表示价格走势',
-    '═══ 横线表示LP Position的价格区间',
-    '🎯 当前价格在区间内时，LP收益最佳',
-    '⚠️ 价格超出区间时，建议重新平衡',
-    '📈 建议定期监控价格变化，及时调整position范围'
-]);
 }

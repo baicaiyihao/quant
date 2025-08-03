@@ -23,11 +23,13 @@ async function main() {
     const minRangeMultiplier = process.env.MIN_RANGE_MULTIPLIER ? parseFloat(process.env.MIN_RANGE_MULTIPLIER) : undefined;
     const slippage = process.env.SLIPPAGE ? parseFloat(process.env.SLIPPAGE) : undefined;
     const balanceError = process.env.BALANCE_ERROR ? parseFloat(process.env.BALANCE_ERROR) : undefined;
+    const rangeExpansionMultiplier = process.env.RANGE_EXPANSION_MULTIPLIER ? parseFloat(process.env.RANGE_EXPANSION_MULTIPLIER) : undefined;
 
     logger.info(`ENV: fundUsageRate:${fundUsageRate}`);
     logger.info(`ENV: minRangeMultiplier:${minRangeMultiplier}`);
     logger.info(`ENV: slippage:${slippage}`);
     logger.info(`ENV: balanceError:${balanceError}`);
+    logger.info(`ENV: rangeExpansionMultiplier:${rangeExpansionMultiplier}`);
 
     if (!private_key) {
         throw Error(`private_key Is Nan`);
@@ -48,6 +50,7 @@ async function main() {
     if (minRangeMultiplier !== undefined) strategyConfig.minRangeMultiplier = minRangeMultiplier;
     if (slippage !== undefined) strategyConfig.slippage = slippage;
     if (balanceError !== undefined) strategyConfig.balanceError = balanceError;
+    if (rangeExpansionMultiplier !== undefined) strategyConfig.rangeExpansionMultiplier = rangeExpansionMultiplier;
 
     // 传递空字符串作为endpoint参数，因为现在使用负载均衡器
     const st = new Strategy("https://fullnode.mainnet.sui.io:443", private_key, poolId, Number(g), strategyConfig);

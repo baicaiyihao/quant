@@ -36,6 +36,8 @@ export class Strategy {
     private lastBreak = BreakType.Unknown
     private readonly G: number = 0;
     private mainnetConfig: any = null; // 缓存配置
+    private consecutiveBreakCount: number = 0; // 连续突破计数器，用于指数退避
+    private lastBreakTime: number = 0; // 最后突破时间戳，用于30分钟冷却
 
 
     constructor(endpoint: string, privateKey: string, poolId: string, g: number, strategyConfig?: Partial<StrategyConfig>) {
@@ -59,6 +61,13 @@ export class Strategy {
         // 打印配置信息
         const config = getStrategyConfig();
         logger.info(`策略配置: 资金使用率=${config.fundUsageRate * 100}%, 最小区间倍数=${config.minRangeMultiplier}, 滑点=${config.slippage * 100}%, 配平误差=${config.balanceError * 100}%`);
+        
+        // 从环境变量读取奖励配置
+        const rewardsConfig = process.env.REWARDS_CONFIG || "";
+        if (rewardsConfig) {
+            setStrategyConfig({ rewardsConfig });
+            logger.info(`奖励监测配置: ${rewardsConfig}`);
+        }
     }
 
     // 获取配置
@@ -169,16 +178,25 @@ export class Strategy {
      * 计算偏移量
      */
     calG() {
+        // 检查是否需要冷却重置
+        this.checkCoolDownReset();
+        
+        const strategyConfig = getStrategyConfig();
+        const rangeExpansionMultiplier = strategyConfig.rangeExpansionMultiplier;
+        
+        // 计算指数退避后的最小区间倍数
+        const expandedMinRangeMultiplier = strategyConfig.minRangeMultiplier * Math.pow(rangeExpansionMultiplier, this.consecutiveBreakCount);
+        
         if (this.lastBreak == BreakType.Unknown) {
             const g1 = 0 + this.G;
             const g2 = 1 + this.G;
-            logger.info(`lastBreak:Unknown BaseG:${this.G} g1:${g1} g2:${g2}`)
+            logger.info(`lastBreak:Unknown BaseG:${this.G} g1:${g1} g2:${g2} consecutiveBreakCount:${this.consecutiveBreakCount} expandedMinRangeMultiplier:${expandedMinRangeMultiplier.toFixed(2)}`)
             return [g1, g2]
         }
         if (this.lastBreak == BreakType.Up) {
             const g1 = 1 + this.G;
             const g2 = 2 + this.G;
-            logger.info(`lastBreak:Up BaseX:${this.G} g1:${g1} g2:${g2}`)
+            logger.info(`lastBreak:Up BaseX:${this.G} g1:${g1} g2:${g2} consecutiveBreakCount:${this.consecutiveBreakCount} expandedMinRangeMultiplier:${expandedMinRangeMultiplier.toFixed(2)}`)
 
             return [g1, g2]
         }
@@ -186,7 +204,7 @@ export class Strategy {
             // noinspection PointlessArithmeticExpressionJS
             const g1 = 1 + this.G;
             const g2 = 2 + this.G;
-            logger.info(`lastBreak:Down BaseX:${this.G} g1:${g1} g2:${g2}`)
+            logger.info(`lastBreak:Down BaseX:${this.G} g1:${g1} g2:${g2} consecutiveBreakCount:${this.consecutiveBreakCount} expandedMinRangeMultiplier:${expandedMinRangeMultiplier.toFixed(2)}`)
             return [g1, g2]
         }
         logger.warn(`lastBreak is None!! default g1,g2`)
@@ -234,8 +252,11 @@ export class Strategy {
         // 计算目标开仓区间
         const tickSpacing = pool.ticks_manager.tick_spacing
         const strategyConfig = getStrategyConfig();
-        const [lowerTick, upperTick] = calTickIndex(currentTick, tickSpacing, g1, g2, strategyConfig.minRangeMultiplier)
-        logger.info(`tickSpacing:${tickSpacing} currentTick:${currentTick} lowerTick:${lowerTick} upperTick:${upperTick} minRangeMultiplier:${strategyConfig.minRangeMultiplier}`);
+        
+        // 使用指数退避后的最小区间倍数
+        const expandedMinRangeMultiplier = strategyConfig.minRangeMultiplier * Math.pow(strategyConfig.rangeExpansionMultiplier, this.consecutiveBreakCount);
+        const [lowerTick, upperTick] = calTickIndex(currentTick, tickSpacing, g1, g2, expandedMinRangeMultiplier)
+        logger.info(`tickSpacing:${tickSpacing} currentTick:${currentTick} lowerTick:${lowerTick} upperTick:${upperTick} expandedMinRangeMultiplier:${expandedMinRangeMultiplier.toFixed(2)} consecutiveBreakCount:${this.consecutiveBreakCount}`);
         // 换算价格区间
         const currentPrice = TickMath.tickIndexToPrice(currentTick, this.decimalsA, this.decimalsB).toNumber();
         const lowerTickPrice = TickMath.tickIndexToPrice(lowerTick, this.decimalsA, this.decimalsB).toNumber();
@@ -269,31 +290,29 @@ export class Strategy {
                     logger.error(`Swap fail => 尝试直接开仓`);
                     swapSuccess = false;
                 }
-            } catch (error) {
-                logger.error(`Swap过程中发生错误: ${error}`);
+            } catch (swapError) {
+                logger.error(`Swap error: ${swapError} => 尝试直接开仓`);
                 swapSuccess = false;
             }
             
-            // 无论swap是否成功，都尝试开仓
-            try {
-                const addOk = await this.toAddLiquidity(lowerTick, upperTick)
-                if (addOk) {
-                    logger.info(`开仓成功: ${swapSuccess ? "Swap+开仓" : "直接开仓"}`);
-                } else {
-                    logger.error(`开仓失败: ${swapSuccess ? "Swap成功但开仓失败" : "直接开仓失败"}`);
-                }
-            } catch (addError) {
-                logger.error(`开仓过程中发生错误: ${addError}`);
+            if (!swapSuccess) {
+                logger.warn(`配平失败，尝试直接开仓`);
             }
-        } else {
-            logger.info(`无需Swap => 直接开仓`);
-            // 无需swap，直接开仓
-            try {
-                const addOk = await this.toAddLiquidity(lowerTick, upperTick)
-                logger.info(`Add Liquidity ${addOk ? "success" : "fail"}`)
-            } catch (error) {
-                logger.error(`Add Liquidity过程中发生错误: ${error}`);
+        }
+
+        // 开仓
+        logger.info(`开始开仓 => AddLiquidity`);
+        try {
+            const addLiquidityOK = await this.toAddLiquidity(lowerTick, upperTick);
+            if (addLiquidityOK) {
+                logger.info(`开仓成功 => 重置连续突破计数器`);
+                this.consecutiveBreakCount = 0; // 开仓成功后重置连续突破计数器
+                this.lastBreakTime = 0; // 重置最后突破时间
+            } else {
+                logger.error(`开仓失败`);
             }
+        } catch (addLiquidityError) {
+            logger.error(`开仓异常: ${addLiquidityError}`);
         }
     }
 
@@ -556,10 +575,12 @@ export class Strategy {
             logger.info(`当前Tick: ${current_tick} => 突破下区间:${lowerTick} => 平仓`);
 
             const closeOK = await this.toClosePos(pool, posID);
-            logger.info(`关闭仓位: ${closeOK ? "success" : "fail"}`);
+            logger.info(`关闭仓位并自动收集奖励: ${closeOK ? "success" : "fail"}`);
 
             this.lastBreak = BreakType.Down
-            logger.info(`设置突破标志位: ${this.lastBreak}`);
+            this.consecutiveBreakCount++; // 增加连续突破计数器
+            this.lastBreakTime = Date.now(); // 更新最后突破时间
+            logger.info(`设置突破标志位: ${this.lastBreak}, 连续突破次数: ${this.consecutiveBreakCount}, 突破时间: ${new Date(this.lastBreakTime).toLocaleString()}`);
             return;
         }
         // 突破
@@ -567,10 +588,12 @@ export class Strategy {
             logger.info(`当前Tick: ${current_tick} => 突破上区间:${upperTick} => 平仓`);
 
             const closeOK = await this.toClosePos(pool, posID);
-            logger.info(`关闭仓位: ${closeOK ? "success" : "fail"}`);
+            logger.info(`关闭仓位并自动收集奖励: ${closeOK ? "success" : "fail"}`);
 
             this.lastBreak = BreakType.Up
-            logger.info(`设置突破标志位: ${this.lastBreak}`);
+            this.consecutiveBreakCount++; // 增加连续突破计数器
+            this.lastBreakTime = Date.now(); // 更新最后突破时间
+            logger.info(`设置突破标志位: ${this.lastBreak}, 连续突破次数: ${this.consecutiveBreakCount}, 突破时间: ${new Date(this.lastBreakTime).toLocaleString()}`);
 
             return;
         }
@@ -597,7 +620,7 @@ export class Strategy {
             const transaction = resp as any;
             const status = transaction?.effects?.status?.status;
             if (status === 'success') {
-                logger.info(`Close Position success`);
+                logger.info(`Close Position success (自动收集所有fee和rewards)`);
                 return true;
             } else {
                 logger.error(`Close Position failed: status = ${status}`);
@@ -622,7 +645,10 @@ export class Strategy {
                 const [g1, g2] = this.calG();
                 const tickSpacing = pool.ticks_manager.tick_spacing;
                 const strategyConfig = getStrategyConfig();
-                const [lowerTick, upperTick] = calTickIndex(pool.current_tick, tickSpacing, g1, g2, strategyConfig.minRangeMultiplier);
+                
+                // 使用指数退避后的最小区间倍数
+                const expandedMinRangeMultiplier = strategyConfig.minRangeMultiplier * Math.pow(strategyConfig.rangeExpansionMultiplier, this.consecutiveBreakCount);
+                const [lowerTick, upperTick] = calTickIndex(pool.current_tick, tickSpacing, g1, g2, expandedMinRangeMultiplier);
                 
                 const lowerPrice = TickMath.tickIndexToPrice(lowerTick, this.decimalsA, this.decimalsB).toNumber();
                 const upperPrice = TickMath.tickIndexToPrice(upperTick, this.decimalsA, this.decimalsB).toNumber();
@@ -635,11 +661,9 @@ export class Strategy {
                 logger.info(`当前价格: ${currentPrice.toFixed(6)} ${this.nameB}/${this.nameA}`);
                 logger.info(`策略参数: G=${this.G}, g1=${g1}, g2=${g2}`);
                 logger.info(`最小区间倍数: ${strategyConfig.minRangeMultiplier} × tickSpacing(${tickSpacing})`);
-                logger.info(`预期开仓区间:`);
-                logger.info(`  下界: ${lowerPrice.toFixed(6)} (${lowerPercentage}%)`);
-                logger.info(`  上界: ${upperPrice.toFixed(6)} (${upperPercentage}%)`);
-                logger.info(`  区间宽度: ${rangePercentage}%`);
-                logger.info(`  Tick区间: [${lowerTick}, ${upperTick}]`);
+                logger.info(`连续突破次数: ${this.consecutiveBreakCount}, 扩展倍数: ${expandedMinRangeMultiplier.toFixed(2)}`);
+                logger.info(`区间范围: ${lowerPrice.toFixed(6)} - ${upperPrice.toFixed(6)} (${rangePercentage}%)`);
+                logger.info(`价格偏移: 下界${lowerPercentage}%, 上界${upperPercentage}%`);
                 
                 const historicalData = await fetchHistoricalPriceData(pool);
                 const predictedRange = { lower: lowerPrice, upper: upperPrice };
@@ -716,6 +740,9 @@ export class Strategy {
         this.client = createBalancedSuiClient();
         logger.info(`重新获取负载均衡RPC客户端`);
         
+        // 检查是否需要冷却重置
+        this.checkCoolDownReset();
+        
         // 获取当前仓位
         const positions = await this.getUserPositions(this.walletAddress)
         if (positions === null) {
@@ -754,13 +781,17 @@ export class Strategy {
             const [g1, g2] = this.calG();
             const tickSpacing = pool.ticks_manager.tick_spacing;
             const strategyConfig = getStrategyConfig();
-            const [lowerTick, upperTick] = calTickIndex(currentTick, tickSpacing, g1, g2, strategyConfig.minRangeMultiplier);
+            
+            // 使用指数退避后的最小区间倍数
+            const expandedMinRangeMultiplier = strategyConfig.minRangeMultiplier * Math.pow(strategyConfig.rangeExpansionMultiplier, this.consecutiveBreakCount);
+            const [lowerTick, upperTick] = calTickIndex(currentTick, tickSpacing, g1, g2, expandedMinRangeMultiplier);
             
             const lowerPrice = TickMath.tickIndexToPrice(lowerTick, this.decimalsA, this.decimalsB).toNumber();
             const upperPrice = TickMath.tickIndexToPrice(upperTick, this.decimalsA, this.decimalsB).toNumber();
             predictedPositionRange = { lower: lowerPrice, upper: upperPrice };
             
             logger.info(`预测仓位区间: ${lowerPrice.toFixed(6)} - ${upperPrice.toFixed(6)} (tick: ${lowerTick} - ${upperTick})`);
+            logger.info(`连续突破次数: ${this.consecutiveBreakCount}, 扩展倍数: ${expandedMinRangeMultiplier.toFixed(2)}`);
         }
 
         // 实时可视化监控
@@ -801,11 +832,9 @@ export class Strategy {
         logger.info(`当前价格: ${currentPrice.toFixed(6)} ${this.nameB}/${this.nameA}`);
         logger.info(`策略参数: G=${this.G}, g1=${g1}, g2=${g2}`);
         logger.info(`最小区间倍数: ${strategyConfig.minRangeMultiplier} × tickSpacing(${tickSpacing})`);
-        logger.info(`预期开仓区间:`);
-        logger.info(`  下界: ${lowerPrice.toFixed(6)} (${lowerPercentage}%)`);
-        logger.info(`  上界: ${upperPrice.toFixed(6)} (${upperPercentage}%)`);
-        logger.info(`  区间宽度: ${rangePercentage}%`);
-        logger.info(`  Tick区间: [${lowerTick}, ${upperTick}]`);
+        logger.info(`连续突破次数: ${this.consecutiveBreakCount}, 扩展倍数: ${strategyConfig.minRangeMultiplier.toFixed(2)}`);
+        logger.info(`区间范围: ${lowerPrice.toFixed(6)} - ${upperPrice.toFixed(6)} (${rangePercentage}%)`);
+        logger.info(`价格偏移: 下界${lowerPercentage}%, 上界${upperPercentage}%`);
         
         await this.handlePositionCreation(pool, currentPrice);
             return;
@@ -820,6 +849,59 @@ export class Strategy {
         // 仓位检测和平仓
         for (const pos of poss) {
             await this.checkPos(pos, pool)
+            
+            // 检查并显示仓位费用和奖励信息
+            logger.info(`=== 检查仓位 ${pos.position_id} 的费用和奖励信息 ===`);
+            const feeAndRewards = await this.getPositionFeeAndRewards(pos, pool);
+            
+            // 检查是否有可领取的费用或奖励
+            let hasRewards = false;
+            let hasFees = false;
+            
+            if (feeAndRewards) {
+                if (feeAndRewards.rewards && feeAndRewards.rewards.length > 0) {
+                    hasRewards = true;
+                }
+                
+                if (feeAndRewards.fee) {
+                    const feeA = stringToDividedNumber(feeAndRewards.fee.coinA.toString(), this.decimalsA);
+                    const feeB = stringToDividedNumber(feeAndRewards.fee.coinB.toString(), this.decimalsB);
+                    if (feeA > 0 || feeB > 0) {
+                        hasFees = true;
+                    }
+                }
+            }
+            
+            // 检查奖励重开条件
+            if (hasRewards && feeAndRewards && feeAndRewards.rewards) {
+                const shouldReopen = this.checkRewardsThreshold(feeAndRewards.rewards);
+                if (shouldReopen) {
+                    logger.info(`🎯 奖励满足重开条件，准备重开仓位`);
+                    
+                    // 直接关闭仓位，会自动收集所有fee和rewards
+                    const closeSuccess = await this.toClosePos(pool, pos.position_id);
+                    if (closeSuccess) {
+                        logger.info(`✅ 成功关闭仓位并自动收集奖励，准备重新开仓`);
+                        
+                        // 等待交易确认
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        
+                        // 重新开仓
+                        await this.handlePositionCreation(pool, currentPrice);
+                        return; // 重开后退出当前循环
+                    } else {
+                        logger.error(`❌ 关闭仓位失败，无法重开`);
+                    }
+                }
+            }
+            
+            // 提示可领取的内容（关闭仓位时会自动收集）
+            if (hasRewards) {
+                logger.info(`发现可领取的奖励，关闭仓位时会自动收集，或使用 collectPositionRewards() 方法手动领取`);
+            }
+            if (hasFees) {
+                logger.info(`发现可领取的费用，关闭仓位时会自动收集，或使用 collectPositionFeeAndRewards() 方法手动领取`);
+            }
         }
 
     }
@@ -1018,6 +1100,185 @@ export class Strategy {
     }
 
     /**
+     * 获取当前仓位的奖励信息
+     * @param position 仓位信息
+     * @param pool 池子信息
+     * @returns 奖励信息数组
+     */
+    async getPositionRewards(position: IPosition, pool: Pool) {
+        try {
+            const config = await this.getConfig();
+            if (!config || !config.contractConfig) {
+                logger.error(`获取仓位奖励失败: 配置无效`);
+                return null;
+            }
+            
+            let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+            const rewards = await oc.getAccruedRewards(pool, position.position_id);
+            
+            if (rewards && rewards.length > 0) {
+                logger.info(`🎁 获取到仓位奖励信息: ${rewards.length} 种奖励`);
+                
+                // 构建表格数据
+                const headers = ['序号', '代币符号', '奖励数量'];
+                const rows = rewards.map((reward, index) => {
+                    const amount = stringToDividedNumber(reward.coinAmount, reward.coinDecimals);
+                    return [(index + 1).toString(), reward.coinSymbol, amount.toString()];
+                });
+                
+                logger.info(`🎁 奖励信息表格:`);
+                logger.renderTable(headers, rows);
+                
+                return rewards;
+            } else {
+                logger.info(`🎁 当前仓位暂无奖励`);
+                return [];
+            }
+        } catch (e) {
+            logger.error(`获取仓位奖励失败: ${e}`);
+            return null;
+        }
+    }
+
+    /**
+     * 获取当前仓位的费用和奖励信息
+     * @param position 仓位信息
+     * @param pool 池子信息
+     * @returns 费用和奖励信息
+     */
+    async getPositionFeeAndRewards(position: IPosition, pool: Pool) {
+        try {
+            const config = await this.getConfig();
+            if (!config || !config.contractConfig) {
+                logger.error(`获取仓位费用和奖励失败: 配置无效`);
+                return null;
+            }
+            
+            let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+            const feeAndRewards = await oc.getAccruedFeeAndRewards(pool, position.position_id);
+            
+            if (feeAndRewards) {
+                logger.info(`获取到仓位费用和奖励信息:`);
+                
+                // 显示费用信息
+                if (feeAndRewards.fee) {
+                    const feeA = stringToDividedNumber(feeAndRewards.fee.coinA.toString(), this.decimalsA);
+                    const feeB = stringToDividedNumber(feeAndRewards.fee.coinB.toString(), this.decimalsB);
+                    
+                    // 构建费用表格数据
+                    const feeHeaders = ['代币', '费用数量'];
+                    const feeRows = [];
+                    
+                    if (feeA > 0) {
+                        feeRows.push([this.nameA, feeA.toString()]);
+                    }
+                    if (feeB > 0) {
+                        feeRows.push([this.nameB, feeB.toString()]);
+                    }
+                    
+                    if (feeRows.length > 0) {
+                        logger.info(`💰 手续费信息表格:`);
+                        logger.renderTable(feeHeaders, feeRows);
+                    } else {
+                        logger.info(`💰 暂无手续费`);
+                    }
+                }
+                
+                // 显示奖励信息
+                if (feeAndRewards.rewards && feeAndRewards.rewards.length > 0) {
+                    logger.info(`🎁 奖励信息 (${feeAndRewards.rewards.length} 种):`);
+                    
+                    // 构建奖励表格数据
+                    const rewardHeaders = ['序号', '代币符号', '奖励数量'];
+                    const rewardRows = feeAndRewards.rewards.map((reward, index) => {
+                        const amount = stringToDividedNumber(reward.coinAmount, reward.coinDecimals);
+                        return [(index + 1).toString(), reward.coinSymbol, amount.toString()];
+                    });
+                    
+                    logger.info(`🎁 奖励信息表格:`);
+                    logger.renderTable(rewardHeaders, rewardRows);
+                } else {
+                    logger.info(`🎁 暂无奖励`);
+                }
+                
+                return feeAndRewards;
+            } else {
+                logger.info(`当前仓位暂无费用和奖励`);
+                return null;
+            }
+        } catch (e) {
+            logger.error(`获取仓位费用和奖励失败: ${e}`);
+            return null;
+        }
+    }
+
+    /**
+     * 领取仓位奖励
+     * @param position 仓位信息
+     * @param pool 池子信息
+     * @returns 是否成功
+     */
+    async collectPositionRewards(position: IPosition, pool: Pool) {
+        try {
+            const config = await this.getConfig();
+            if (!config || !config.contractConfig) {
+                logger.error(`领取仓位奖励失败: 配置无效`);
+                return false;
+            }
+            
+            let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+            const resp = await oc.collectRewards(pool, position.position_id);
+            
+            // 检查交易状态
+            const transaction = resp as any;
+            const status = transaction?.effects?.status?.status;
+            if (status === 'success') {
+                logger.info(`✅ 领取仓位奖励成功`);
+                return true;
+            } else {
+                logger.error(`❌ 领取仓位奖励失败: status = ${status}`);
+                return false;
+            }
+        } catch (e) {
+            logger.error(`领取仓位奖励失败: ${e}`);
+            return false;
+        }
+    }
+
+    /**
+     * 领取仓位费用和奖励
+     * @param position 仓位信息
+     * @param pool 池子信息
+     * @returns 是否成功
+     */
+    async collectPositionFeeAndRewards(position: IPosition, pool: Pool) {
+        try {
+            const config = await this.getConfig();
+            if (!config || !config.contractConfig) {
+                logger.error(`领取仓位费用和奖励失败: 配置无效`);
+                return false;
+            }
+            
+            let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+            const resp = await oc.collectFeeAndRewards(pool, position.position_id);
+            
+            // 检查交易状态
+            const transaction = resp as any;
+            const status = transaction?.effects?.status?.status;
+            if (status === 'success') {
+                logger.info(`✅ 领取仓位费用和奖励成功`);
+                return true;
+            } else {
+                logger.error(`❌ 领取仓位费用和奖励失败: status = ${status}`);
+                return false;
+            }
+        } catch (e) {
+            logger.error(`领取仓位费用和奖励失败: ${e}`);
+            return false;
+        }
+    }
+
+    /**
      * 测试OnChainCalls库是否正常工作
      */
     async testOnChainCalls() {
@@ -1049,6 +1310,111 @@ export class Strategy {
     }
 
     /**
+     * 解析奖励配置字符串
+     * @param configStr 配置字符串，格式如 "BLUE>1.1orTOKENB>1.2"
+     * @returns 解析后的条件数组
+     */
+    private parseRewardsConfig(configStr: string): Array<{token: string, threshold: number}> {
+        if (!configStr || configStr.trim() === "") {
+            return [];
+        }
+        
+        const conditions: Array<{token: string, threshold: number}> = [];
+        
+        // 按 "or" 分割多个条件
+        const parts = configStr.split("or");
+        
+        for (const part of parts) {
+            const trimmed = part.trim();
+            if (!trimmed) continue;
+            
+            // 查找 > 符号
+            const gtIndex = trimmed.indexOf(">");
+            if (gtIndex === -1) {
+                logger.warn(`无效的奖励配置格式: ${trimmed}`);
+                continue;
+            }
+            
+            const token = trimmed.substring(0, gtIndex).trim();
+            const thresholdStr = trimmed.substring(gtIndex + 1).trim();
+            const threshold = parseFloat(thresholdStr);
+            
+            if (isNaN(threshold)) {
+                logger.warn(`无效的阈值: ${thresholdStr}`);
+                continue;
+            }
+            
+            conditions.push({ token, threshold });
+        }
+        
+        return conditions;
+    }
+
+    /**
+     * 检查奖励是否满足重开条件
+     * @param rewards 奖励数组
+     * @returns 是否满足重开条件
+     */
+    private checkRewardsThreshold(rewards: any[]): boolean {
+        const strategyConfig = getStrategyConfig();
+        const conditions = this.parseRewardsConfig(strategyConfig.rewardsConfig);
+        
+        if (conditions.length === 0) {
+            return false; // 没有配置条件，不重开
+        }
+        
+        logger.info(`检查奖励重开条件: ${strategyConfig.rewardsConfig}`);
+        
+        // 检查每个条件
+        for (const condition of conditions) {
+            const { token, threshold } = condition;
+            
+            // 在奖励中查找对应代币
+            const matchingReward = rewards.find(reward => 
+                reward.coinSymbol && reward.coinSymbol.toUpperCase() === token.toUpperCase()
+            );
+            
+            if (matchingReward) {
+                const amount = stringToDividedNumber(matchingReward.coinAmount, matchingReward.coinDecimals);
+                logger.info(`代币 ${token}: 当前=${amount}, 阈值=${threshold}`);
+                
+                if (amount >= threshold) {
+                    logger.info(`✅ 满足重开条件: ${token} >= ${threshold}`);
+                    return true;
+                }
+            } else {
+                logger.info(`未找到代币 ${token} 的奖励`);
+            }
+        }
+        
+        logger.info(`❌ 不满足任何重开条件`);
+        return false;
+    }
+
+    /**
+     * 测试奖励配置解析
+     * @param testConfig 测试配置字符串
+     */
+    testRewardsConfig(testConfig: string) {
+        logger.info(`测试奖励配置解析: ${testConfig}`);
+        const conditions = this.parseRewardsConfig(testConfig);
+        
+        logger.info(`解析结果:`);
+        for (const condition of conditions) {
+            logger.info(`  代币: ${condition.token}, 阈值: ${condition.threshold}`);
+        }
+        
+        // 模拟奖励数据测试
+        const mockRewards = [
+            { coinSymbol: "BLUE", coinAmount: "1100000000", coinDecimals: 9 }, // 1.1 BLUE
+            { coinSymbol: "TOKENB", coinAmount: "1200000000", coinDecimals: 9 }, // 1.2 TOKENB
+        ];
+        
+        const shouldReopen = this.checkRewardsThreshold(mockRewards);
+        logger.info(`模拟奖励测试结果: ${shouldReopen ? "满足重开条件" : "不满足重开条件"}`);
+    }
+
+    /**
      * 间隔运行核心
      */
     async run() {
@@ -1076,5 +1442,22 @@ export class Strategy {
     private round(value: number, decimals: number): number {
         const factor = Math.pow(10, decimals);
         return Math.round(value * factor) / factor;
+    }
+
+    /***
+     * 检查是否需要冷却重置
+     * 如果超过30分钟没有突破，重置连续突破计数器
+     */
+    private checkCoolDownReset() {
+        const now = Date.now();
+        const thirtyMinutes = 30 * 60 * 1000; // 30分钟的毫秒数
+        
+        if (this.lastBreakTime > 0 && (now - this.lastBreakTime) > thirtyMinutes) {
+            if (this.consecutiveBreakCount > 0) {
+                logger.info(`🔄 30分钟冷却时间已到，重置连续突破计数器: ${this.consecutiveBreakCount} -> 0`);
+                this.consecutiveBreakCount = 0;
+                this.lastBreakTime = 0; // 重置时间戳
+            }
+        }
     }
 }
