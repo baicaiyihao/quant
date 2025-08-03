@@ -37,7 +37,7 @@ export class Strategy {
     private readonly G: number = 0;
     private mainnetConfig: any = null; // 缓存配置
     private consecutiveBreakCount: number = 0; // 连续突破计数器，用于指数退避
-    private lastBreakTime: number = 0; // 最后突破时间戳，用于30分钟冷却
+    private lastBreakTime: number = 0; // 最后突破时间戳，用于10分钟冷却
 
 
     constructor(endpoint: string, privateKey: string, poolId: string, g: number, strategyConfig?: Partial<StrategyConfig>) {
@@ -1446,11 +1446,11 @@ export class Strategy {
 
     /***
      * 检查是否需要冷却重置
-     * 如果超过30分钟没有突破，重置连续突破计数器
+     * 如果超过10分钟没有突破，重置连续突破计数器
      */
     private checkCoolDownReset() {
         const now = Date.now();
-        const thirtyMinutes = 30 * 60 * 1000; // 30分钟的毫秒数
+        const thirtyMinutes = 10 * 60 * 1000; // 10分钟的毫秒数
         
         if (this.lastBreakTime > 0 && (now - this.lastBreakTime) > thirtyMinutes) {
             if (this.consecutiveBreakCount > 0) {
