@@ -328,29 +328,71 @@ export class Strategy {
         const strategyConfig = getStrategyConfig();
         
         // 计算实际可用余额，预留一些作为gas费
-        const gasReserve = 0.1; // 预留0.1 SUI作为gas费
-        const availableBalanceB = Math.max(0, balanceB - (this.coinB === "0x2::sui::SUI" ? gasReserve : 0));
-        const usableAmount = availableBalanceB * strategyConfig.fundUsageRate;
+        const gasReserve = 0.1;
+        const bufferRatio = 0.02; // 2%缓冲量
+        const availableBalanceA = Math.max(0, balanceA * (1 - bufferRatio) - (this.coinA === "0x2::sui::SUI" ? gasReserve : 0));
+        const availableBalanceB = Math.max(0, balanceB * (1 - bufferRatio) - (this.coinB === "0x2::sui::SUI" ? gasReserve : 0));
         
-        logger.info(`资金计算: balanceB=${balanceB}, gasReserve=${gasReserve}, availableBalanceB=${availableBalanceB}, fundUsageRate=${strategyConfig.fundUsageRate}, usableAmount=${usableAmount}`);
+        const usageRate = strategyConfig.fundUsageRate;
+        const usableAmountA = availableBalanceA * usageRate;
+        const usableAmountB = availableBalanceB * usageRate;
         
-        if (usableAmount <= 0) {
-            logger.error(`可用资金不足: usableAmount=${usableAmount}`);
+        logger.info(`资金计算: A=${usableAmountA.toFixed(6)} ${this.nameA}, B=${usableAmountB.toFixed(6)} ${this.nameB} (使用率${(usageRate*100).toFixed(0)}%, 缓冲${(bufferRatio*100).toFixed(1)}%)`);
+        
+        // 智能选择基准代币：根据目标比例选择能充分利用资金的方案
+        const [x, y] = this.calXY(lowerTick, upperTick, curSqrtPrice.toString());
+        const ratio = x / y; // A:B的目标比例
+        
+        // 计算以A为基准能添加多少流动性
+        const requiredBFromA = usableAmountA / ratio;
+        // 计算以B为基准能添加多少流动性  
+        const requiredAFromB = usableAmountB * ratio;
+        
+        let useACoin = false;
+        let baseAmount = 0;
+        
+        if (requiredBFromA <= usableAmountB && usableAmountA > 0) {
+            // 可以以A为基准
+            if (requiredAFromB <= usableAmountA && usableAmountB > 0) {
+                // 两种都可以，选择能提供更多流动性的
+                if (usableAmountA > requiredAFromB) {
+                    useACoin = true;
+                    baseAmount = usableAmountA;
+                    logger.info(`选择A代币作为基准，使用${baseAmount.toFixed(6)} ${this.nameA}, 需要${requiredBFromA.toFixed(6)} ${this.nameB}`);
+                } else {
+                    useACoin = false;
+                    baseAmount = usableAmountB;
+                    logger.info(`选择B代币作为基准，使用${baseAmount.toFixed(6)} ${this.nameB}, 需要${requiredAFromB.toFixed(6)} ${this.nameA}`);
+                }
+            } else {
+                // 只能以A为基准
+                useACoin = true;
+                baseAmount = usableAmountA;
+                logger.info(`只能以A代币作为基准，使用${baseAmount.toFixed(6)} ${this.nameA}, 需要${requiredBFromA.toFixed(6)} ${this.nameB}`);
+            }
+        } else if (requiredAFromB <= usableAmountA && usableAmountB > 0) {
+            // 只能以B为基准
+            useACoin = false;
+            baseAmount = usableAmountB;
+            logger.info(`只能以B代币作为基准，使用${baseAmount.toFixed(6)} ${this.nameB}, 需要${requiredAFromB.toFixed(6)} ${this.nameA}`);
+        } else {
+            logger.error(`资金不足以开仓: A需要=${requiredAFromB.toFixed(6)}(有${usableAmountA.toFixed(6)}), B需要=${requiredBFromA.toFixed(6)}(有${usableAmountB.toFixed(6)})`);
             return false;
         }
         
-        let coinAmountBN = new BN(toBigNumberStr(usableAmount, this.decimalsB));
-        let roundUp = true
-        let slippage = strategyConfig.slippage
-        const isCoinA = false;
-
+        if (baseAmount <= 0) {
+            logger.error(`基准代币数量不足: ${baseAmount}`);
+            return false;
+        }
+        
+        const coinAmountBN = new BN(toBigNumberStr(baseAmount, useACoin ? this.decimalsA : this.decimalsB));
         const liquidityInput = ClmmPoolUtil.estLiquidityAndCoinAmountFromOneAmounts(
             lowerTick,
             upperTick,
             coinAmountBN,
-            isCoinA,
-            roundUp,
-            slippage,
+            useACoin, // 根据选择使用A或B代币作为基准
+            true,
+            strategyConfig.slippage,
             curSqrtPrice
         );
         
@@ -363,14 +405,14 @@ export class Strategy {
             return false;
         }
         
-        // 验证计算的金额是否超过实际余额
+        // 验证计算的金额是否超过可用余额
         const requiredA = liquidityInput.coinAmountA.toNumber() / Math.pow(10, this.decimalsA);
         const requiredB = liquidityInput.coinAmountB.toNumber() / Math.pow(10, this.decimalsB);
-        logger.info(`需要资金: ${this.nameA}=${requiredA}, ${this.nameB}=${requiredB}`);
-        logger.info(`钱包余额: ${this.nameA}=${balanceA}, ${this.nameB}=${balanceB}`);
+        logger.info(`最终需要资金: ${this.nameA}=${requiredA.toFixed(6)}, ${this.nameB}=${requiredB.toFixed(6)}`);
+        logger.info(`可用余额: ${this.nameA}=${availableBalanceA.toFixed(6)}, ${this.nameB}=${availableBalanceB.toFixed(6)}`);
         
-        if (requiredA > balanceA || requiredB > balanceB) {
-            logger.error(`资金不足: 需要${this.nameA}=${requiredA}(有${balanceA}), 需要${this.nameB}=${requiredB}(有${balanceB})`);
+        if (requiredA > availableBalanceA || requiredB > availableBalanceB) {
+            logger.error(`计算错误，所需资金超出可用余额: 需要${this.nameA}=${requiredA.toFixed(6)}(可用${availableBalanceA.toFixed(6)}), 需要${this.nameB}=${requiredB.toFixed(6)}(可用${availableBalanceB.toFixed(6)})`);
             return false;
         }
         // liquidityInput
@@ -437,10 +479,13 @@ export class Strategy {
      * @returns a2b swap方向，amount swap数量
      */
     calSwap(p: number, x: number, y: number, a: number, b: number, slip: number): [boolean, number] {
-        const k = x / y;
+        const k = x / y; // 目标比例 A:B
         const A = this.nameA;
         const B = this.nameB;
 
+        logger.info(`配平计算: 目标比例k=${k.toFixed(6)}, 当前比例=${(a/b).toFixed(6)}, 价格p=${p.toFixed(6)}, 滑点=${slip}`);
+
+        // 如果B资产为0，只能用A换B
         if (b === 0) {
             logger.info(`${B} 资产不足, 执行 ${A} => ${B}`);
             const a2b = true;
@@ -451,6 +496,7 @@ export class Strategy {
             return [a2b, this.round(n, 4)];
         }
 
+        // 检查是否在容忍范围内，无需配平
         if (k <= a / b && a / b <= (1 + slip) * k) {
             const a2b = false;
             const n = 0;
@@ -458,6 +504,7 @@ export class Strategy {
             return [a2b, n];
         }
 
+        // A资产过多，需要A换B
         if (a / b > (1 + slip) * k) {
             logger.info(`${B} 资产不足, 执行 ${A} => ${B}`);
             const n = (a - b * k) / (1 + p * k);  // n此时表示代币A的输入值
@@ -468,9 +515,10 @@ export class Strategy {
             return [a2b, this.round(n, 4)];
         }
 
+        // A资产不足，需要B换A  
         if (a / b < k) {
             logger.info(`${A} 资产不足, 执行 ${B} => ${A}`);
-            const n = (b * k * p - a * p) / (1 + k * p);  // m此时表示输入代币B的数量
+            const n = (b * k * p - a * p) / (1 + k * p);  // n此时表示输入代币B的数量
             const a_ = a + n / p;
             const b_ = b - n;
             const a2b = false;
@@ -763,11 +811,210 @@ export class Strategy {
             return;
         }
 
+        // 检查是否有新余额需要加入现有仓位
+        if (poss.length > 0) {
+            logger.info(`检查是否需要为现有仓位追加流动性...`);
+            await this.checkAndAddToExistingPosition(poss[0], pool);
+        }
+
         // 仓位检测和平仓
         for (const pos of poss) {
             await this.checkPos(pos, pool)
         }
 
+    }
+
+    /**
+     * 检查并向现有仓位追加流动性
+     */
+    async checkAndAddToExistingPosition(position: IPosition, pool: Pool) {
+        try {
+            // 获取当前余额
+            const result = await this.getAssert();
+            if (result === null) {
+                logger.info("获取资金信息异常，跳过追加流动性检查");
+                return;
+            }
+            
+            const [balanceA, balanceB, balanceSUI] = result as number[];
+            const strategyConfig = getStrategyConfig();
+            
+            // 计算可用余额，预留gas费和缓冲量
+            const gasReserve = 0.1;
+            const bufferRatio = 0.02; // 2%缓冲量，避免精度问题
+            const availableBalanceA = Math.max(0, balanceA * (1 - bufferRatio) - (this.coinA === "0x2::sui::SUI" ? gasReserve : 0));
+            const availableBalanceB = Math.max(0, balanceB * (1 - bufferRatio) - (this.coinB === "0x2::sui::SUI" ? gasReserve : 0));
+            
+            // 检查是否有足够的余额需要追加
+            const minAddThreshold = parseFloat(process.env.MIN_ADD_THRESHOLD || '1'); // 最小追加阈值，从环境变量获取，默认1
+            if (availableBalanceA < minAddThreshold && availableBalanceB < minAddThreshold) {
+                logger.info(`余额不足追加阈值，跳过追加流动性: A=${availableBalanceA}, B=${availableBalanceB}`);
+                return;
+            }
+            
+            // 检查当前价格是否还在仓位区间内
+            const currentTick = pool.current_tick;
+            if (currentTick <= position.lower_tick || currentTick >= position.upper_tick) {
+                logger.info(`当前价格已超出仓位区间，不追加流动性: tick=${currentTick}, 区间=[${position.lower_tick}, ${position.upper_tick}]`);
+                return;
+            }
+            
+            logger.info(`检测到可追加余额: A=${availableBalanceA.toFixed(6)} ${this.nameA}, B=${availableBalanceB.toFixed(6)} ${this.nameB} (已扣除${(bufferRatio*100).toFixed(1)}%缓冲量)`);
+            
+            // 计算追加流动性所需的代币比例
+            const curSqrtPrice = new BN(pool.current_sqrt_price);
+            const [x, y] = this.calXY(position.lower_tick, position.upper_tick, pool.current_sqrt_price);
+            logger.info(`现有仓位所需比例 x:y = ${x}:${y}`);
+            
+            // 检查是否需要配平
+            const currentPrice = TickMath.tickIndexToPrice(currentTick, this.decimalsA, this.decimalsB).toNumber();
+            const [a2b, swapAmount] = this.calSwap(
+                currentPrice, x, y, availableBalanceA, availableBalanceB, strategyConfig.balanceError
+            );
+            
+            // 如果需要配平，先检查配平数量是否达到阈值
+            if (swapAmount > 0) {
+                if (swapAmount < minAddThreshold) {
+                    logger.info(`配平数量太小(${swapAmount.toFixed(6)} < ${minAddThreshold})，跳过配平但继续检查是否可直接追加流动性`);
+                } else {
+                    logger.info(`追加流动性前需要配平: ${a2b ? this.nameA + '->' + this.nameB : this.nameB + '->' + this.nameA}, 数量=${swapAmount}`);
+                    const swapOK = await this.toSwap(pool, a2b, swapAmount, strategyConfig.slippage);
+                    if (!swapOK) {
+                        logger.warn("配平失败，但尝试直接追加流动性");
+                    }
+                    // 等待交易确认
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+            
+            // 重新获取余额（如果进行了配平）或使用原始余额
+            let finalAvailableA = availableBalanceA;
+            let finalAvailableB = availableBalanceB;
+            
+            if (swapAmount > 0 && swapAmount >= minAddThreshold) {
+                // 只有在实际执行了配平时才重新获取余额
+                const resultAfterSwap = await this.getAssert();
+                if (resultAfterSwap === null) {
+                    logger.error("配平后获取资金信息异常，取消追加流动性");
+                    return;
+                }
+                
+                const [newBalanceA, newBalanceB] = resultAfterSwap as number[];
+                finalAvailableA = Math.max(0, newBalanceA * (1 - bufferRatio) - (this.coinA === "0x2::sui::SUI" ? gasReserve : 0));
+                finalAvailableB = Math.max(0, newBalanceB * (1 - bufferRatio) - (this.coinB === "0x2::sui::SUI" ? gasReserve : 0));
+                logger.info(`配平后重新获取余额: A=${finalAvailableA.toFixed(6)}, B=${finalAvailableB.toFixed(6)}`);
+            } else {
+                logger.info(`使用原始余额进行追加流动性: A=${finalAvailableA.toFixed(6)}, B=${finalAvailableB.toFixed(6)}`);
+            }
+            
+            // 计算可使用的资金量
+            const usageRate = strategyConfig.fundUsageRate;
+            const usableAmountA = finalAvailableA * usageRate;
+            const usableAmountB = finalAvailableB * usageRate;
+            
+            logger.info(`可用资金计算: A=${usableAmountA.toFixed(6)} ${this.nameA}, B=${usableAmountB.toFixed(6)} ${this.nameB} (使用率${(usageRate*100).toFixed(0)}%)`);
+            
+            // 智能选择基准代币：选择能提供更多流动性的代币作为基准
+            const ratio = x / y; // A:B的目标比例
+            
+            // 计算以A为基准能添加多少流动性
+            const maxLiquidityFromA = usableAmountA;
+            const requiredBFromA = maxLiquidityFromA / ratio;
+            
+            // 计算以B为基准能添加多少流动性  
+            const maxLiquidityFromB = usableAmountB * ratio;
+            const requiredAFromB = usableAmountB * ratio;
+            
+            let useACoin = false;
+            let baseAmount = 0;
+            
+            if (requiredBFromA <= usableAmountB && maxLiquidityFromA >= minAddThreshold) {
+                // 可以以A为基准
+                if (requiredAFromB <= usableAmountA && maxLiquidityFromB >= minAddThreshold) {
+                    // 两种都可以，选择能提供更多流动性的
+                    if (maxLiquidityFromA > maxLiquidityFromB) {
+                        useACoin = true;
+                        baseAmount = maxLiquidityFromA;
+                        logger.info(`选择A代币作为基准，可添加更多流动性: ${maxLiquidityFromA.toFixed(6)} > ${maxLiquidityFromB.toFixed(6)}`);
+                    } else {
+                        useACoin = false;
+                        baseAmount = usableAmountB;
+                        logger.info(`选择B代币作为基准，可添加更多流动性: ${maxLiquidityFromB.toFixed(6)} >= ${maxLiquidityFromA.toFixed(6)}`);
+                    }
+                } else {
+                    // 只能以A为基准
+                    useACoin = true;
+                    baseAmount = maxLiquidityFromA;
+                    logger.info(`只能以A代币作为基准: 需要B=${requiredBFromA.toFixed(6)}, 可用B=${usableAmountB.toFixed(6)}`);
+                }
+            } else if (requiredAFromB <= usableAmountA && maxLiquidityFromB >= minAddThreshold) {
+                // 只能以B为基准
+                useACoin = false;
+                baseAmount = usableAmountB;
+                logger.info(`只能以B代币作为基准: 需要A=${requiredAFromB.toFixed(6)}, 可用A=${usableAmountA.toFixed(6)}`);
+            } else {
+                logger.info(`两种代币都不足以达到最小追加阈值${minAddThreshold}, A基准需要=${requiredBFromA.toFixed(6)}B(有${usableAmountB.toFixed(6)}), B基准需要=${requiredAFromB.toFixed(6)}A(有${usableAmountA.toFixed(6)})`);
+                return;
+            }
+            
+            if (baseAmount <= 0) {
+                logger.info("基准代币数量不足，取消追加流动性");
+                return;
+            }
+            
+            const coinAmountBN = new BN(toBigNumberStr(baseAmount, useACoin ? this.decimalsA : this.decimalsB));
+            const liquidityInput = ClmmPoolUtil.estLiquidityAndCoinAmountFromOneAmounts(
+                position.lower_tick,
+                position.upper_tick,
+                coinAmountBN,
+                useACoin, // 使用A或B代币作为基准
+                true,
+                strategyConfig.slippage,
+                curSqrtPrice
+            );
+            
+            if (!liquidityInput || liquidityInput.coinAmountA.isNeg() || liquidityInput.coinAmountB.isNeg()) {
+                logger.error("追加流动性计算失败");
+                return;
+            }
+            
+            const requiredA = liquidityInput.coinAmountA.toNumber() / Math.pow(10, this.decimalsA);
+            const requiredB = liquidityInput.coinAmountB.toNumber() / Math.pow(10, this.decimalsB);
+            
+            // 检查追加数量是否达到最小阈值
+            if (requiredA < minAddThreshold && requiredB < minAddThreshold) {
+                logger.info(`追加数量太小，跳过追加流动性: A=${requiredA.toFixed(6)} ${this.nameA}, B=${requiredB.toFixed(6)} ${this.nameB} (阈值=${minAddThreshold})`);
+                return;
+            }
+            
+            if (requiredA > finalAvailableA || requiredB > finalAvailableB) {
+                logger.warn(`追加流动性所需资金超出余额: 需要A=${requiredA}(有${finalAvailableA}), 需要B=${requiredB}(有${finalAvailableB})`);
+                return;
+            }
+            
+            logger.info(`准备追加流动性: A=${requiredA.toFixed(6)} ${this.nameA}, B=${requiredB.toFixed(6)} ${this.nameB} (基于使用率${(strategyConfig.fundUsageRate*100).toFixed(0)}%计算)`);
+            
+            // 执行追加流动性
+            const config = await this.getConfig();
+            if (!config || !config.contractConfig) {
+                logger.error("配置无效，无法追加流动性");
+                return;
+            }
+            
+            const oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+            const resp = await oc.provideLiquidityWithFixedAmount(pool, position.position_id, liquidityInput);
+            
+            const transaction = resp as any;
+            const status = transaction?.effects?.status?.status;
+            if (status === 'success') {
+                logger.info(`✅ 追加流动性成功: A=${requiredA} ${this.nameA}, B=${requiredB} ${this.nameB}`);
+            } else {
+                logger.error(`❌ 追加流动性失败: status = ${status}`);
+            }
+            
+        } catch (error) {
+            logger.error(`追加流动性过程中发生错误: ${error}`);
+        }
     }
 
     /**
