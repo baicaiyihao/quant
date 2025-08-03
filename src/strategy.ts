@@ -81,10 +81,20 @@ export class Strategy {
     // 获取池子信息
     async getPool(poolID: string) {
         let qc = new QueryChain(this.client);
-        return await qc.getPool(poolID).catch(e => {
-            logger.error(`${e}`);
-            return null;
-        });
+        try {
+            return await qc.getPool(poolID);
+        } catch (e) {
+            logger.error(`QueryChain.getPool failed: ${e}`);
+            // 重新创建客户端并重试
+            this.client = createBalancedSuiClient();
+            qc = new QueryChain(this.client);
+            try {
+                return await qc.getPool(poolID);
+            } catch (retryError) {
+                logger.error(`Retry QueryChain.getPool failed: ${retryError}`);
+                return null;
+            }
+        }
     }
 
     /***
@@ -127,10 +137,20 @@ export class Strategy {
     async getUserPositions(userAddress: string) {
         let qc = new QueryChain(this.client);
         const config = await this.getConfig();
-        return await qc.getUserPositions(config.contractConfig.BasePackage, userAddress).catch(e => {
-            logger.error(e);
-            return null;
-        });
+        try {
+            return await qc.getUserPositions(config.contractConfig.BasePackage, userAddress);
+        } catch (e) {
+            logger.error(`QueryChain.getUserPositions failed: ${e}`);
+            // 重新创建客户端并重试
+            this.client = createBalancedSuiClient();
+            qc = new QueryChain(this.client);
+            try {
+                return await qc.getUserPositions(config.contractConfig.BasePackage, userAddress);
+            } catch (retryError) {
+                logger.error(`Retry QueryChain.getUserPositions failed: ${retryError}`);
+                return null;
+            }
+        }
     }
 
     /***
