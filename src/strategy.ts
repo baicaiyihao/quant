@@ -1,4 +1,4 @@
-import {IPosition, ISwapParams, OnChainCalls, QueryChain, Pool} from "@firefly-exchange/library-sui/spot";
+import {IPosition, ISwapParams, OnChainCalls, QueryChain, Pool, IFeeAndRewards} from "@firefly-exchange/library-sui/spot";
 import {Ed25519Keypair, SuiClient, toBigNumber, toBigNumberStr, ClmmPoolUtil, TickMath} from "@firefly-exchange/library-sui";
 
 import {getMainnetConfig} from "./config";
@@ -8,6 +8,7 @@ import {calTickIndex, coinTypeToName, scalingDown, stringToDividedNumber} from "
 import {getStrategyConfig, setStrategyConfig, StrategyConfig} from "./strategy-config";
 import {fetchHistoricalPriceData, displayPoolChart} from "./analyze";
 import {createBalancedSuiClient} from "./rpc-balancer";
+import {fetchTokenPrices, calculateTotalRewardPrice} from "./price-service";
 
 
 /**
@@ -68,88 +69,140 @@ export class Strategy {
             setStrategyConfig({ rewardsConfig });
             logger.info(`奖励监测配置: ${rewardsConfig}`);
         }
+        
+
     }
 
-    // 获取配置
+    // 获取配置 - 无限重试直到成功
     private async getConfig() {
         if (!this.mainnetConfig) {
-            this.mainnetConfig = await getMainnetConfig();
+            let attemptCount = 0;
+            
+            while (true) {
+                attemptCount++;
+                try {
+                    this.mainnetConfig = await getMainnetConfig();
+                    if (this.mainnetConfig) {
+                        logger.info(`Successfully got config after ${attemptCount} attempts`);
+                        break;
+                    }
+                } catch (e) {
+                    logger.error(`getMainnetConfig attempt ${attemptCount} failed: ${e}`);
+                }
+                
+                // 切换客户端
+                this.client = createBalancedSuiClient();
+                logger.info(`Switched client for config attempt ${attemptCount + 1}`);
+                
+                // 短暂延迟避免过于频繁的请求
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
         }
         return this.mainnetConfig;
     }
 
-    // 获取池子信息
+    // 获取池子信息 - 无限重试直到成功
     async getPool(poolID: string) {
-        let qc = new QueryChain(this.client);
-        try {
-            return await qc.getPool(poolID);
-        } catch (e) {
-            logger.error(`QueryChain.getPool failed: ${e}`);
-            // 重新创建客户端并重试
-            this.client = createBalancedSuiClient();
-            qc = new QueryChain(this.client);
+        let attemptCount = 0;
+        
+        while (true) {
+            attemptCount++;
+            let qc = new QueryChain(this.client);
+            
             try {
-                return await qc.getPool(poolID);
-            } catch (retryError) {
-                logger.error(`Retry QueryChain.getPool failed: ${retryError}`);
-                return null;
+                const pool = await qc.getPool(poolID);
+                if (pool) {
+                    logger.info(`Successfully got pool data after ${attemptCount} attempts`);
+                    return pool;
+                }
+            } catch (e) {
+                logger.error(`QueryChain.getPool attempt ${attemptCount} failed: ${e}`);
             }
+            
+            // 切换客户端
+            this.client = createBalancedSuiClient();
+            logger.info(`Switched client for attempt ${attemptCount + 1}`);
+            
+            // 短暂延迟避免过于频繁的请求
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
     }
 
     /***
-     * 获取用户资产信息，限定本池中的A和B
+     * 获取用户资产信息，限定本池中的A和B - 无限重试直到成功
      */
     async getAssert(): Promise<number[] | null> {
         const COIN_SUI = "0x2::sui::SUI"
         const DECIMALS_SUI = 9
 
-        let amountA: number = 0.0;
-        let amountB: number = 0.0;
-        let amountSUI: number = 0.0;
-        try {
-            const balances = await this.client.getAllBalances({owner: this.walletAddress});
+        let attemptCount = 0;
+        
+        while (true) {
+            attemptCount++;
+            let amountA: number = 0.0;
+            let amountB: number = 0.0;
+            let amountSUI: number = 0.0;
+            
+            try {
+                const balances = await this.client.getAllBalances({owner: this.walletAddress});
 
-            for (const balance of balances) {
-                if (balance.coinType === this.coinA) {
-                    amountA = stringToDividedNumber(balance.totalBalance, this.decimalsA);
-                }
+                for (const balance of balances) {
+                    if (balance.coinType === this.coinA) {
+                        amountA = stringToDividedNumber(balance.totalBalance, this.decimalsA);
+                    }
 
-                if (balance.coinType === this.coinB) {
-                    amountB = stringToDividedNumber(balance.totalBalance, this.decimalsB);
-                }
+                    if (balance.coinType === this.coinB) {
+                        amountB = stringToDividedNumber(balance.totalBalance, this.decimalsB);
+                    }
 
-                if (balance.coinType === COIN_SUI) {
-                    amountSUI = stringToDividedNumber(balance.totalBalance, DECIMALS_SUI);
+                    if (balance.coinType === COIN_SUI) {
+                        amountSUI = stringToDividedNumber(balance.totalBalance, DECIMALS_SUI);
+                    }
                 }
+                
+                logger.info(`Successfully got asset data after ${attemptCount} attempts: A=${amountA}, B=${amountB}, SUI=${amountSUI}`);
+                return [amountA, amountB, amountSUI];
+            } catch (e) {
+                logger.error(`getAllBalances attempt ${attemptCount} failed: ${e}`);
             }
-        } catch (e) {
-            return null;
+            
+            // 切换客户端
+            this.client = createBalancedSuiClient();
+            logger.info(`Switched client for asset attempt ${attemptCount + 1}`);
+            
+            // 短暂延迟避免过于频繁的请求
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        return [amountA, amountB, amountSUI];
-
     }
 
     /**
-     * 获取用户仓位信息
+     * 获取用户仓位信息 - 无限重试直到成功
      * @param userAddress 钱包地址
      */
     async getUserPositions(userAddress: string) {
-        let qc = new QueryChain(this.client);
-        const config = await this.getConfig();
-        try {
-            return await qc.getUserPositions(config.contractConfig.BasePackage, userAddress);
-        } catch (e) {
-            logger.error(`QueryChain.getUserPositions failed: ${e}`);
-            // 重新创建客户端并重试
-            this.client = createBalancedSuiClient();
-            qc = new QueryChain(this.client);
+        let attemptCount = 0;
+        
+        while (true) {
+            attemptCount++;
+            let qc = new QueryChain(this.client);
+            const config = await this.getConfig();
+            
             try {
-                return await qc.getUserPositions(config.contractConfig.BasePackage, userAddress);
-            } catch (retryError) {
-                logger.error(`Retry QueryChain.getUserPositions failed: ${retryError}`);
-                return null;
+                const positions = await qc.getUserPositions(config.contractConfig.BasePackage, userAddress);
+                if (positions) {
+                    logger.info(`Successfully got user positions after ${attemptCount} attempts`);
+                    return positions;
+                }
+            } catch (e) {
+                logger.error(`QueryChain.getUserPositions attempt ${attemptCount} failed: ${e}`);
             }
+            
+            // 切换客户端
+            this.client = createBalancedSuiClient();
+            logger.info(`Switched client for positions attempt ${attemptCount + 1}`);
+            
+            // 短暂延迟避免过于频繁的请求
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
     }
 
@@ -299,24 +352,33 @@ export class Strategy {
 
         if (amount > 0) {
             logger.info(`正在配平 => Swap`);
-            let swapSuccess = false;
             
-            try {
-                const swapOK = await this.toSwap(pool, a2b, amount, strategyConfig.slippage)
-                if (swapOK) {
-                    logger.info(`Swap success => 去开仓`);
-                    swapSuccess = true;
-                } else {
-                    logger.error(`Swap fail => 尝试直接开仓`);
+            // 在配平前进行价格检查
+            const swapValue = await this.calculateSwapValue(pool, a2b, amount);
+            if (swapValue < 10) {
+                logger.warn(`🚫 开仓配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+                logger.info(`跳过配平，尝试直接开仓`);
+            } else {
+                logger.info(`✅ 开仓配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+                let swapSuccess = false;
+                
+                try {
+                    const swapOK = await this.toSwap(pool, a2b, amount, strategyConfig.slippage)
+                    if (swapOK) {
+                        logger.info(`Swap success => 去开仓`);
+                        swapSuccess = true;
+                    } else {
+                        logger.error(`Swap fail => 尝试直接开仓`);
+                        swapSuccess = false;
+                    }
+                } catch (swapError) {
+                    logger.error(`Swap error: ${swapError} => 尝试直接开仓`);
                     swapSuccess = false;
                 }
-            } catch (swapError) {
-                logger.error(`Swap error: ${swapError} => 尝试直接开仓`);
-                swapSuccess = false;
-            }
-            
-            if (!swapSuccess) {
-                logger.warn(`配平失败，尝试直接开仓`);
+                
+                if (!swapSuccess) {
+                    logger.warn(`配平失败，尝试直接开仓`);
+                }
             }
         }
 
@@ -483,6 +545,15 @@ export class Strategy {
 
     async toSwap(poolState: Pool, a2b: boolean, amount: number, slippage = 0.05) {
         try {
+            // 在swap前进行价格检查
+            const swapValue = await this.calculateSwapValue(poolState, a2b, amount);
+            if (swapValue < 10) {
+                logger.warn(`🚫 Swap被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+                return false;
+            }
+            
+            logger.info(`✅ Swap通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+            
             let iSwapParams: ISwapParams = {
                 pool: poolState,
                 amountIn: toBigNumber(amount, a2b ? this.decimalsA : this.decimalsB),
@@ -506,6 +577,45 @@ export class Strategy {
 
     }
 
+
+    /**
+     * 计算swap交易的价值（美元）
+     * @param poolState 池子状态
+     * @param a2b 是否A换B
+     * @param amount swap数量
+     * @returns 交易价值（美元）
+     */
+    async calculateSwapValue(poolState: Pool, a2b: boolean, amount: number): Promise<number> {
+        try {
+            // 确定要查询价格的代币地址
+            const tokenAddress = a2b ? this.coinA : this.coinB;
+            
+            if (!tokenAddress) {
+                logger.warn('无法确定代币地址，跳过价格检查');
+                return 0;
+            }
+            
+            // 获取代币价格
+            const tokenPrices = await fetchTokenPrices([tokenAddress]);
+            
+            if (tokenPrices.length === 0) {
+                logger.warn(`无法获取代币 ${tokenAddress} 的价格信息，跳过价格检查`);
+                return 0;
+            }
+            
+            const priceInfo = tokenPrices[0];
+            const priceValue = parseFloat(priceInfo.price);
+            const swapValue = amount * priceValue;
+            
+            logger.info(`💰 Swap价格计算: 代币=${a2b ? this.nameA : this.nameB}, 数量=${amount.toFixed(6)}, 价格=$${priceValue.toFixed(6)}, 总价值=$${swapValue.toFixed(2)}`);
+            
+            return swapValue;
+            
+        } catch (error) {
+            logger.error(`计算swap价值失败: ${error}`);
+            return 0;
+        }
+    }
 
     /**
      * 计算配平参数
@@ -660,7 +770,11 @@ export class Strategy {
         
         try {
             // 显示开仓前的状态和策略配置
-            logger.info(`📊 开仓前状态显示...`);
+            logger.info(`📊 开仓前状态显示...`);  
+            // 执行开仓
+            logger.info(`🚀 开始执行开仓操作...`);
+            await this.toOpenPos(pool);
+            await new Promise(resolve => setTimeout(resolve, 1000));
             try {
                 const [g1, g2] = this.calG();
                 const tickSpacing = pool.ticks_manager.tick_spacing;
@@ -692,18 +806,14 @@ export class Strategy {
             } catch (preDisplayError) {
                 logger.warn(`开仓前显示渲染失败: ${preDisplayError}`);
             }
-            
-            // 执行开仓
-            logger.info(`🚀 开始执行开仓操作...`);
-            await this.toOpenPos(pool);
-            
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
             // 等待交易确认
             logger.info(`⏳ 等待交易确认...`);
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
             // 重新获取仓位信息
             logger.info(`🔍 检查开仓结果...`);
             const newPositions = await this.getUserPositions(this.walletAddress);
+            await new Promise(resolve => setTimeout(resolve, 1000));
             if (newPositions) {
                 const newPoss = newPositions.filter(position => position.pool_id === this.poolId);
                 if (newPoss.length > 0) {
@@ -771,6 +881,8 @@ export class Strategy {
         }
         // 仓位集合过滤，去除非目标池下的仓位
         const poss: IPosition[] = positions.filter(position => position.pool_id === this.poolId);
+        //休息1000ms
+        await new Promise(resolve => setTimeout(resolve, 1000));
         // 获取Pool信息
         const pool = await this.getPool(this.poolId);
         if (pool === null) {
@@ -813,7 +925,8 @@ export class Strategy {
             logger.info(`预测仓位区间: ${lowerPrice.toFixed(6)} - ${upperPrice.toFixed(6)} (tick: ${lowerTick} - ${upperTick})`);
             logger.info(`连续突破次数: ${this.consecutiveBreakCount}, 扩展倍数: ${expandedMinRangeMultiplier.toFixed(2)}`);
         }
-
+        //休息1000ms
+        await new Promise(resolve => setTimeout(resolve, 1000));
         // 实时可视化监控
         try {
             const historicalData = await fetchHistoricalPriceData(pool);
@@ -831,9 +944,9 @@ export class Strategy {
             logger.warn(`渲染监控图表失败: ${error}`);
         }
 
+        await new Promise(resolve => setTimeout(resolve, 300));
         // 开仓逻辑
-        if (poss.length === 0) {
-                    logger.info(`当前仓位不存在 => 准备开仓`);
+        if (poss.length === 0) { logger.info(`当前仓位不存在 => 准备开仓`);
         
         // 在开仓前显示策略配置和预期价格区间
         const [g1, g2] = this.calG();
@@ -855,15 +968,16 @@ export class Strategy {
         logger.info(`连续突破次数: ${this.consecutiveBreakCount}, 扩展倍数: ${strategyConfig.minRangeMultiplier.toFixed(2)}`);
         logger.info(`区间范围: ${lowerPrice.toFixed(6)} - ${upperPrice.toFixed(6)} (${rangePercentage}%)`);
         logger.info(`价格偏移: 下界${lowerPercentage}%, 上界${upperPercentage}%`);
-        
         await this.handlePositionCreation(pool, currentPrice);
-            return;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return;
         }
 
         // 检查是否有新余额需要加入现有仓位
         if (poss.length > 0) {
             logger.info(`检查是否需要为现有仓位追加流动性...`);
             await this.checkAndAddToExistingPosition(poss[0], pool);
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
         // 仓位检测和平仓
@@ -893,15 +1007,18 @@ export class Strategy {
             }
             
             // 检查奖励重开条件
-            if (hasRewards && feeAndRewards && feeAndRewards.rewards) {
-                const shouldReopen = this.checkRewardsThreshold(feeAndRewards.rewards);
+            if (feeAndRewards) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                const shouldReopen = await this.checkRewardsThreshold(feeAndRewards);
+                
                 if (shouldReopen) {
-                    logger.info(`🎯 奖励满足重开条件，准备重开仓位`);
+                    logger.info(`🎯 手续费+奖励满足重开条件，准备重开仓位`);
                     
                     // 直接关闭仓位，会自动收集所有fee和rewards
                     const closeSuccess = await this.toClosePos(pool, pos.position_id);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                     if (closeSuccess) {
-                        logger.info(`✅ 成功关闭仓位并自动收集奖励，准备重新开仓`);
+                        logger.info(`✅ 成功关闭仓位并自动收集手续费和奖励，准备重新开仓`);
                         
                         // 等待交易确认
                         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -913,6 +1030,8 @@ export class Strategy {
                         logger.error(`❌ 关闭仓位失败，无法重开`);
                     }
                 }
+                
+
             }
             
             // 提示可领取的内容（关闭仓位时会自动收集）
@@ -980,12 +1099,21 @@ export class Strategy {
                     logger.info(`配平数量太小(${swapAmount.toFixed(6)} < ${minAddThreshold})，跳过配平但继续检查是否可直接追加流动性`);
                 } else {
                     logger.info(`追加流动性前需要配平: ${a2b ? this.nameA + '->' + this.nameB : this.nameB + '->' + this.nameA}, 数量=${swapAmount}`);
-                    const swapOK = await this.toSwap(pool, a2b, swapAmount, strategyConfig.slippage);
-                    if (!swapOK) {
-                        logger.warn("配平失败，但尝试直接追加流动性");
+                    
+                    // 在配平前进行价格检查
+                    const swapValue = await this.calculateSwapValue(pool, a2b, swapAmount);
+                    if (swapValue < 10) {
+                        logger.warn(`🚫 追加流动性配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+                        // 跳过配平但继续检查是否可直接追加流动性
+                    } else {
+                        logger.info(`✅ 追加流动性配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+                        const swapOK = await this.toSwap(pool, a2b, swapAmount, strategyConfig.slippage);
+                        if (!swapOK) {
+                            logger.warn("配平失败，但尝试直接追加流动性");
+                        }
+                        // 等待交易确认
+                        await new Promise(resolve => setTimeout(resolve, 1000));
                     }
-                    // 等待交易确认
-                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             }
             
@@ -1120,115 +1248,147 @@ export class Strategy {
     }
 
     /**
-     * 获取当前仓位的奖励信息
+     * 获取当前仓位的奖励信息 - 无限重试直到成功
      * @param position 仓位信息
      * @param pool 池子信息
      * @returns 奖励信息数组
      */
     async getPositionRewards(position: IPosition, pool: Pool) {
-        try {
-            const config = await this.getConfig();
-            if (!config || !config.contractConfig) {
-                logger.error(`获取仓位奖励失败: 配置无效`);
-                return null;
-            }
-            
-            let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
-            const rewards = await oc.getAccruedRewards(pool, position.position_id);
-            
-            if (rewards && rewards.length > 0) {
-                logger.info(`🎁 获取到仓位奖励信息: ${rewards.length} 种奖励`);
-                
-                // 构建表格数据
-                const headers = ['序号', '代币符号', '奖励数量'];
-                const rows = rewards.map((reward, index) => {
-                    const amount = stringToDividedNumber(reward.coinAmount, reward.coinDecimals);
-                    return [(index + 1).toString(), reward.coinSymbol, amount.toString()];
-                });
-                
-                logger.info(`🎁 奖励信息表格:`);
-                logger.renderTable(headers, rows);
-                
-                return rewards;
-            } else {
-                logger.info(`🎁 当前仓位暂无奖励`);
-                return [];
-            }
-        } catch (e) {
-            logger.error(`获取仓位奖励失败: ${e}`);
-            return null;
-        }
-    }
-
-    /**
-     * 获取当前仓位的费用和奖励信息
-     * @param position 仓位信息
-     * @param pool 池子信息
-     * @returns 费用和奖励信息
-     */
-    async getPositionFeeAndRewards(position: IPosition, pool: Pool) {
-        try {
-            const config = await this.getConfig();
-            if (!config || !config.contractConfig) {
-                logger.error(`获取仓位费用和奖励失败: 配置无效`);
-                return null;
-            }
-            
-            let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
-            const feeAndRewards = await oc.getAccruedFeeAndRewards(pool, position.position_id);
-            
-            if (feeAndRewards) {
-                logger.info(`获取到仓位费用和奖励信息:`);
-                
-                // 显示费用信息
-                if (feeAndRewards.fee) {
-                    const feeA = stringToDividedNumber(feeAndRewards.fee.coinA.toString(), this.decimalsA);
-                    const feeB = stringToDividedNumber(feeAndRewards.fee.coinB.toString(), this.decimalsB);
-                    
-                    // 构建费用表格数据
-                    const feeHeaders = ['代币', '费用数量'];
-                    const feeRows = [];
-                    
-                    if (feeA > 0) {
-                        feeRows.push([this.nameA, feeA.toString()]);
-                    }
-                    if (feeB > 0) {
-                        feeRows.push([this.nameB, feeB.toString()]);
-                    }
-                    
-                    if (feeRows.length > 0) {
-                        logger.info(`💰 手续费信息表格:`);
-                        logger.renderTable(feeHeaders, feeRows);
-                    } else {
-                        logger.info(`💰 暂无手续费`);
-                    }
+        let attemptCount = 0;
+        
+        while (true) {
+            attemptCount++;
+            try {
+                const config = await this.getConfig();
+                if (!config || !config.contractConfig) {
+                    logger.error(`获取仓位奖励失败: 配置无效`);
+                    // 切换客户端并重试
+                    this.client = createBalancedSuiClient();
+                    logger.info(`Switched client for rewards attempt ${attemptCount + 1}`);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
                 }
                 
-                // 显示奖励信息
-                if (feeAndRewards.rewards && feeAndRewards.rewards.length > 0) {
-                    logger.info(`🎁 奖励信息 (${feeAndRewards.rewards.length} 种):`);
+                let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+                const rewards = await oc.getAccruedRewards(pool, position.position_id);
+                
+                if (rewards && rewards.length > 0) {
+                    logger.info(`🎁 获取到仓位奖励信息: ${rewards.length} 种奖励`);
                     
-                    // 构建奖励表格数据
-                    const rewardHeaders = ['序号', '代币符号', '奖励数量'];
-                    const rewardRows = feeAndRewards.rewards.map((reward, index) => {
+                    // 构建表格数据
+                    const headers = ['序号', '代币符号', '奖励数量'];
+                    const rows = rewards.map((reward, index) => {
                         const amount = stringToDividedNumber(reward.coinAmount, reward.coinDecimals);
                         return [(index + 1).toString(), reward.coinSymbol, amount.toString()];
                     });
                     
                     logger.info(`🎁 奖励信息表格:`);
-                    logger.renderTable(rewardHeaders, rewardRows);
+                    logger.renderTable(headers, rows);
+                    
+                    logger.info(`Successfully got position rewards after ${attemptCount} attempts`);
+                    return rewards;
                 } else {
-                    logger.info(`🎁 暂无奖励`);
+                    logger.info(`🎁 当前仓位暂无奖励`);
+                    return [];
+                }
+            } catch (e) {
+                logger.error(`获取仓位奖励 attempt ${attemptCount} failed: ${e}`);
+            }
+            
+            // 切换客户端
+            this.client = createBalancedSuiClient();
+            logger.info(`Switched client for rewards attempt ${attemptCount + 1}`);
+            
+            // 短暂延迟避免过于频繁的请求
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+
+    /**
+     * 获取当前仓位的费用和奖励信息 - 无限重试直到成功
+     * @param position 仓位信息
+     * @param pool 池子信息
+     * @returns 费用和奖励信息
+     */
+    async getPositionFeeAndRewards(position: IPosition, pool: Pool) {
+        let attemptCount = 0;
+        
+        while (true) {
+            attemptCount++;
+            try {
+                const config = await this.getConfig();
+                if (!config || !config.contractConfig) {
+                    logger.error(`获取仓位费用和奖励失败: 配置无效`);
+                    // 切换客户端并重试
+                    this.client = createBalancedSuiClient();
+                    logger.info(`Switched client for feeAndRewards attempt ${attemptCount + 1}`);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
                 }
                 
-                return feeAndRewards;
-            } else {
-                logger.info(`当前仓位暂无费用和奖励`);
-                return null;
+                let oc = new OnChainCalls(this.client, config.contractConfig, {signer: this.keyPair});
+                const feeAndRewards = await oc.getAccruedFeeAndRewards(pool, position.position_id);
+                
+                if (feeAndRewards) {
+                    logger.info(`获取到仓位费用和奖励信息:`);
+                    
+                    // 显示费用信息
+                    if (feeAndRewards.fee) {
+                        const feeA = stringToDividedNumber(feeAndRewards.fee.coinA.toString(), this.decimalsA);
+                        const feeB = stringToDividedNumber(feeAndRewards.fee.coinB.toString(), this.decimalsB);
+                        
+                        // 构建费用表格数据
+                        const feeHeaders = ['代币', '费用数量'];
+                        const feeRows = [];
+                        
+                        if (feeA > 0) {
+                            feeRows.push([this.nameA, feeA.toString()]);
+                        }
+                        if (feeB > 0) {
+                            feeRows.push([this.nameB, feeB.toString()]);
+                        }
+                        
+                        if (feeRows.length > 0) {
+                            logger.info(`💰 手续费信息表格:`);
+                            logger.renderTable(feeHeaders, feeRows);
+                        } else {
+                            logger.info(`💰 暂无手续费`);
+                        }
+                    }
+                    
+                    // 显示奖励信息
+                    if (feeAndRewards.rewards && feeAndRewards.rewards.length > 0) {
+                        logger.info(`🎁 奖励信息 (${feeAndRewards.rewards.length} 种):`);
+                        
+                        // 构建奖励表格数据
+                        const rewardHeaders = ['序号', '代币符号', '奖励数量'];
+                        const rewardRows = feeAndRewards.rewards.map((reward, index) => {
+                            const amount = stringToDividedNumber(reward.coinAmount, reward.coinDecimals);
+                            return [(index + 1).toString(), reward.coinSymbol, amount.toString()];
+                        });
+                        
+                        logger.info(`🎁 奖励信息表格:`);
+                        logger.renderTable(rewardHeaders, rewardRows);
+                    } else {
+                        logger.info(`🎁 暂无奖励`);
+                    }
+                    
+                    logger.info(`Successfully got position fee and rewards after ${attemptCount} attempts`);
+                    return feeAndRewards;
+                } else {
+                    logger.info(`当前仓位暂无费用和奖励`);
+                    return null;
+                }
+            } catch (e) {
+                logger.error(`获取仓位费用和奖励 attempt ${attemptCount} failed: ${e}`);
             }
-        } catch (e) {
-            logger.error(`获取仓位费用和奖励失败: ${e}`);
-            return null;
+            
+            // 切换客户端
+            this.client = createBalancedSuiClient();
+            logger.info(`Switched client for feeAndRewards attempt ${attemptCount + 1}`);
+            
+            // 短暂延迟避免过于频繁的请求
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
     }
 
@@ -1371,11 +1531,11 @@ export class Strategy {
     }
 
     /**
-     * 检查奖励是否满足重开条件
-     * @param rewards 奖励数组
+     * 检查手续费+奖励是否满足重开条件
+     * @param feeAndRewards 手续费和奖励信息
      * @returns 是否满足重开条件
      */
-    private checkRewardsThreshold(rewards: any[]): boolean {
+    private async checkRewardsThreshold(rewards: IFeeAndRewards): Promise<boolean> {
         const strategyConfig = getStrategyConfig();
         const conditions = this.parseRewardsConfig(strategyConfig.rewardsConfig);
         
@@ -1383,27 +1543,184 @@ export class Strategy {
             return false; // 没有配置条件，不重开
         }
         
-        logger.info(`检查奖励重开条件: ${strategyConfig.rewardsConfig}`);
+        logger.info(`检查手续费+奖励重开条件: ${strategyConfig.rewardsConfig}`);
+        
+        // 分离价格条件和数量条件
+        const priceConditions = conditions.filter(condition => 
+            condition.token.toLowerCase() === 'price'
+        );
+        const amountConditions = conditions.filter(condition => 
+            condition.token.toLowerCase() !== 'price'
+        );
+        
+        // 检查数量条件
+        let amountConditionMet = false;
+        if (amountConditions.length > 0) {
+            amountConditionMet = this.checkAmountBasedRewards(rewards, amountConditions);
+        }
+        
+        // 检查价格条件
+        let priceConditionMet = false;
+        if (priceConditions.length > 0) {
+            priceConditionMet = await this.checkPriceBasedRewards(rewards);
+        }
+        
+        // 如果任一条件满足，则返回true
+        const finalResult = amountConditionMet || priceConditionMet;
+        logger.info(`策略检查结果: 数量条件=${amountConditionMet}, 价格条件=${priceConditionMet}, 最终结果=${finalResult}`);
+        
+        return finalResult;
+    }
+    
+    /**
+     * 基于价格的奖励检查
+     */
+    private async checkPriceBasedRewards(rewards: IFeeAndRewards): Promise<boolean> {
+        try {
+            const strategyConfig = getStrategyConfig();
+            const conditions = this.parseRewardsConfig(strategyConfig.rewardsConfig);
+            
+            // 获取价格阈值
+            const priceCondition = conditions.find(condition => 
+                condition.token.toLowerCase() === 'price'
+            );
+            
+            if (!priceCondition) {
+                logger.warn('未找到价格条件配置');
+                return false;
+            }
+            
+            const priceThreshold = priceCondition.threshold;
+            
+            // 合并手续费和奖励
+            const allRewards = [];
+            
+            // 添加手续费
+            if (rewards.fee) {
+                if (rewards.fee.coinA && rewards.fee.coinA.toString() !== '0') {
+                    const feeA = stringToDividedNumber(rewards.fee.coinA.toString(), this.decimalsA);
+                    if (feeA > 0) {
+                        allRewards.push({
+                            coinType: this.coinA,
+                            coinAmount: rewards.fee.coinA.toString(),
+                            coinDecimals: this.decimalsA,
+                            coinSymbol: this.nameA
+                        });
+                    }
+                }
+                if (rewards.fee.coinB && rewards.fee.coinB.toString() !== '0') {
+                    const feeB = stringToDividedNumber(rewards.fee.coinB.toString(), this.decimalsB);
+                    if (feeB > 0) {
+                        allRewards.push({
+                            coinType: this.coinB,
+                            coinAmount: rewards.fee.coinB.toString(),
+                            coinDecimals: this.decimalsB,
+                            coinSymbol: this.nameB
+                        });
+                    }
+                }
+            }
+            
+            // 添加奖励
+            if (rewards.rewards && rewards.rewards.length > 0) {
+                allRewards.push(...rewards.rewards);
+            }
+            
+            if (allRewards.length === 0) {
+                logger.info('没有奖励信息，不执行价格检测');
+                return false;
+            }
+            
+            // 提取代币地址
+            const tokens = allRewards.map(reward => reward.coinType).filter((token): token is string => token !== null && token !== undefined);
+            
+            if (tokens.length === 0) {
+                logger.warn('没有有效的代币地址');
+                return false;
+            }
+            
+            // 获取代币价格
+            const tokenPrices = await fetchTokenPrices(tokens);
+            
+            if (tokenPrices.length === 0) {
+                logger.warn('无法获取代币价格信息');
+                return false;
+            }
+            
+            // 计算总价格
+            const totalPrice = calculateTotalRewardPrice(allRewards, tokenPrices);
+            
+            // 检查是否满足价格条件
+            const meetsCondition = totalPrice > priceThreshold;
+            logger.info(`价格检测: 总价格=${totalPrice.toFixed(6)}, 阈值=${priceThreshold}, 满足条件=${meetsCondition}`);
+            
+            return meetsCondition;
+            
+        } catch (error) {
+            logger.error(`价格检测失败: ${error}`);
+            return false;
+        }
+    }
+    
+    /**
+     * 基于数量的奖励检查 (原有逻辑)
+     */
+    private checkAmountBasedRewards(rewards: IFeeAndRewards, conditions: Array<{token: string, threshold: number}>): boolean {
+        // 合并手续费和奖励的代币数量
+        const combinedTokens: { [key: string]: number } = {};
+        
+        // 添加手续费
+        if (rewards.fee) {
+            if (rewards.fee.coinA && rewards.fee.coinA.toString() !== '0') {
+                const feeA = stringToDividedNumber(rewards.fee.coinA.toString(), this.decimalsA);
+                if (feeA > 0) {
+                    combinedTokens[this.nameA] = (combinedTokens[this.nameA] || 0) + feeA;
+                }
+            }
+            if (rewards.fee.coinB && rewards.fee.coinB.toString() !== '0') {
+                const feeB = stringToDividedNumber(rewards.fee.coinB.toString(), this.decimalsB);
+                if (feeB > 0) {
+                    combinedTokens[this.nameB] = (combinedTokens[this.nameB] || 0) + feeB;
+                }
+            }
+        }
+        
+        // 添加奖励
+        if (rewards.rewards && rewards.rewards.length > 0) {
+            for (const reward of rewards.rewards) {
+                if (reward.coinSymbol && reward.coinAmount) {
+                    const amount = stringToDividedNumber(reward.coinAmount, reward.coinDecimals);
+                    if (amount > 0) {
+                        combinedTokens[reward.coinSymbol] = (combinedTokens[reward.coinSymbol] || 0) + amount;
+                    }
+                }
+            }
+        }
         
         // 检查每个条件
         for (const condition of conditions) {
             const { token, threshold } = condition;
             
-            // 在奖励中查找对应代币
-            const matchingReward = rewards.find(reward => 
-                reward.coinSymbol && reward.coinSymbol.toUpperCase() === token.toUpperCase()
+            // 跳过价格条件，因为已经在价格检测中处理
+            if (token.toLowerCase() === 'price') {
+                continue;
+            }
+            
+            // 在合并的代币中查找对应代币
+            const matchingToken = Object.keys(combinedTokens).find(coinSymbol => 
+                coinSymbol.toUpperCase() === token.toUpperCase()
             );
             
-            if (matchingReward) {
-                const amount = stringToDividedNumber(matchingReward.coinAmount, matchingReward.coinDecimals);
-                logger.info(`代币 ${token}: 当前=${amount}, 阈值=${threshold}`);
+            if (matchingToken) {
+                const totalAmount = combinedTokens[matchingToken];
+                logger.info(`代币 ${token}: 手续费+奖励总计=${totalAmount}, 阈值=${threshold}`);
                 
-                if (amount >= threshold) {
+                if (totalAmount >= threshold) {
                     logger.info(`✅ 满足重开条件: ${token} >= ${threshold}`);
                     return true;
                 }
             } else {
-                logger.info(`未找到代币 ${token} 的奖励`);
+                logger.info(`未找到代币 ${token} 的手续费或奖励`);
             }
         }
         
@@ -1411,28 +1728,7 @@ export class Strategy {
         return false;
     }
 
-    /**
-     * 测试奖励配置解析
-     * @param testConfig 测试配置字符串
-     */
-    testRewardsConfig(testConfig: string) {
-        logger.info(`测试奖励配置解析: ${testConfig}`);
-        const conditions = this.parseRewardsConfig(testConfig);
-        
-        logger.info(`解析结果:`);
-        for (const condition of conditions) {
-            logger.info(`  代币: ${condition.token}, 阈值: ${condition.threshold}`);
-        }
-        
-        // 模拟奖励数据测试
-        const mockRewards = [
-            { coinSymbol: "BLUE", coinAmount: "1100000000", coinDecimals: 9 }, // 1.1 BLUE
-            { coinSymbol: "TOKENB", coinAmount: "1200000000", coinDecimals: 9 }, // 1.2 TOKENB
-        ];
-        
-        const shouldReopen = this.checkRewardsThreshold(mockRewards);
-        logger.info(`模拟奖励测试结果: ${shouldReopen ? "满足重开条件" : "不满足重开条件"}`);
-    }
+
 
     /**
      * 间隔运行核心
@@ -1470,7 +1766,7 @@ export class Strategy {
      */
     private checkCoolDownReset() {
         const now = Date.now();
-        const thirtyMinutes = 10 * 60 * 1000; // 10分钟的毫秒数
+        const thirtyMinutes = 15 * 60 * 1000; // 10分钟的毫秒数
         
         if (this.lastBreakTime > 0 && (now - this.lastBreakTime) > thirtyMinutes) {
             if (this.consecutiveBreakCount > 0) {

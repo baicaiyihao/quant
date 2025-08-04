@@ -1,5 +1,180 @@
 import { logger } from "./Logger";
 import * as asciichart from "asciichart";
+import * as https from 'https';
+import * as http from 'http';
+import { URL } from 'url';
+
+// 简单的内存缓存
+interface CacheEntry {
+  data: string;
+  timestamp: number;
+  isExpired: boolean; // 标记是否过期，但保留数据作为fallback
+}
+
+const cache = new Map<string, CacheEntry>();
+const CACHE_DURATION = 60 * 1000; // 1分钟缓存
+
+// 缓存管理函数
+function getCachedResponse(url: string): string | null {
+  const entry = cache.get(url);
+  if (!entry) return null;
+  
+  const now = Date.now();
+  const isExpired = now - entry.timestamp > CACHE_DURATION;
+  
+  // 如果过期，标记为过期但保留数据
+  if (isExpired && !entry.isExpired) {
+    entry.isExpired = true;
+  }
+  
+  // 返回数据（无论是否过期，都可用于fallback）
+  return entry.data;
+}
+
+function setCachedResponse(url: string, data: string): void {
+  cache.set(url, {
+    data,
+    timestamp: Date.now(),
+    isExpired: false
+  });
+}
+
+// 清理过期缓存（只清理真正过期的数据，保留fallback数据）
+function cleanupExpiredCache(): void {
+  const now = Date.now();
+  for (const [url, entry] of cache.entries()) {
+    // 只清理超过5分钟的数据（给fallback数据更多时间）
+    if (now - entry.timestamp > 5 * 60 * 1000) {
+      cache.delete(url);
+    }
+  }
+}
+
+// 获取fallback数据（过期的缓存数据）
+function getFallbackResponse(url: string): string | null {
+  const entry = cache.get(url);
+  if (!entry || !entry.isExpired) return null;
+  
+  return entry.data;
+}
+
+// 使用Node.js内置模块进行HTTP请求
+async function makeHttpRequest(urlString: string): Promise<any> {
+  // 检查缓存
+  const cachedData = getCachedResponse(urlString);
+  if (cachedData) {
+    logger.info(`Using cached response for: ${urlString}`);
+    try {
+      return JSON.parse(cachedData);
+    } catch (parseError) {
+      logger.warn(`Failed to parse cached data: ${parseError}`);
+      // 如果解析失败，删除缓存并继续正常请求
+      cache.delete(urlString);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const options = {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'BlueQuant/1.0.0',
+        'Accept': 'application/json',
+        'Connection': 'keep-alive'
+      },
+      timeout: 10000 // 10秒超时
+    };
+
+    const client = url.protocol === 'https:' ? https : http;
+    
+    const req = client.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            // 缓存原始响应数据（不解析）
+            setCachedResponse(urlString, data);
+            logger.info(`Cached response for: ${urlString}`);
+            
+            const jsonData = JSON.parse(data);
+            resolve(jsonData);
+          } else {
+            // 网络请求失败，尝试使用fallback数据
+            const fallbackData = getFallbackResponse(urlString);
+            if (fallbackData) {
+              logger.warn(`Network request failed, using fallback data for: ${urlString}`);
+              try {
+                const jsonData = JSON.parse(fallbackData);
+                resolve(jsonData);
+              } catch (parseError) {
+                reject(new Error(`Failed to parse fallback data: ${parseError}`));
+              }
+            } else {
+              reject(new Error(`HTTP ${res.statusCode}: ${res.statusMessage || 'Unknown error'}`));
+            }
+          }
+        } catch (parseError) {
+          // 解析失败，尝试使用fallback数据
+          const fallbackData = getFallbackResponse(urlString);
+          if (fallbackData) {
+            logger.warn(`Response parsing failed, using fallback data for: ${urlString}`);
+            try {
+              const jsonData = JSON.parse(fallbackData);
+              resolve(jsonData);
+            } catch (fallbackParseError) {
+              reject(new Error(`Failed to parse fallback data: ${fallbackParseError}`));
+            }
+          } else {
+            reject(new Error(`Failed to parse JSON response: ${parseError}`));
+          }
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      // 网络错误，尝试使用fallback数据
+      const fallbackData = getFallbackResponse(urlString);
+      if (fallbackData) {
+        logger.warn(`Network error, using fallback data for: ${urlString}`);
+        try {
+          const jsonData = JSON.parse(fallbackData);
+          resolve(jsonData);
+        } catch (parseError) {
+          reject(new Error(`Failed to parse fallback data: ${parseError}`));
+        }
+      } else {
+        reject(new Error(`Network error: ${error.message}`));
+      }
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      // 超时，尝试使用fallback数据
+      const fallbackData = getFallbackResponse(urlString);
+      if (fallbackData) {
+        logger.warn(`Request timeout, using fallback data for: ${urlString}`);
+        try {
+          const jsonData = JSON.parse(fallbackData);
+          resolve(jsonData);
+        } catch (parseError) {
+          reject(new Error(`Failed to parse fallback data: ${parseError}`));
+        }
+      } else {
+        reject(new Error('Request timeout after 10 seconds'));
+      }
+    });
+
+    req.end();
+  });
+}
 
 export async function fetchHistoricalPriceData(pool: any) {
     try {
@@ -23,12 +198,8 @@ export async function fetchHistoricalPriceData(pool: any) {
       const url = `https://candlesticks.api.sui-prod.bluefin.io/api/v1/pair-price-feed?baseCoin=${baseCoin}&quoteCoin=${quoteCoin}&resolution=60&from=${from}&to=${now}`;
       logger.info(`Fetching historical data from: ${url}`);
       
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      
-      const data = await response.json();
+      // 使用Node.js内置的https模块替代fetch
+      const data = await makeHttpRequest(url);
       
       // 验证返回的数据结构
       if (!data || !data.bars || !Array.isArray(data.bars)) {
@@ -39,9 +210,16 @@ export async function fetchHistoricalPriceData(pool: any) {
       return data;
     } catch (error) {
       logger.warn(`获取历史数据失败: ${error}`);
+      // 添加更详细的错误信息
+      if (error instanceof Error) {
+        logger.error(`详细错误信息: ${error.message}`);
+        if (error.stack) {
+          logger.debug(`错误堆栈: ${error.stack}`);
+        }
+      }
       return null;
     }
-  }
+}
 
 
 // 显示Pool价格走势图
@@ -198,4 +376,33 @@ if (historicalData && historicalData.bars && historicalData.bars.length > 0) {
     
     logger.renderTable(headers, rows);
 }
+}
+
+// 定期清理过期缓存（每30秒执行一次）
+setInterval(cleanupExpiredCache, 30 * 1000);
+
+// 导出缓存统计信息函数（用于调试）
+export function getCacheStats() {
+  const now = Date.now();
+  let validEntries = 0;
+  let expiredEntries = 0;
+  let fallbackEntries = 0;
+  
+  for (const [url, entry] of cache.entries()) {
+    if (entry.isExpired) {
+      fallbackEntries++;
+    } else if (now - entry.timestamp > CACHE_DURATION) {
+      expiredEntries++;
+    } else {
+      validEntries++;
+    }
+  }
+  
+  return {
+    totalEntries: cache.size,
+    validEntries,
+    expiredEntries,
+    fallbackEntries,
+    cacheDuration: CACHE_DURATION / 1000 + 's'
+  };
 }

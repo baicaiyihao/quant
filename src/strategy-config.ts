@@ -7,7 +7,7 @@ export interface StrategyConfig {
     slippage: number;
     // 配平误差 (0-1之间，默认0.1表示10%)
     balanceError: number;
-    // 奖励监测配置 (格式: "TOKEN1>1.1orTOKEN2>1.2")
+    // 奖励监测配置 (格式: "TOKEN1>1.1orTOKEN2>1.2" 或 "price>1")
     rewardsConfig: string;
     // 区间扩大倍数 (用于连续突破时的指数退避，默认2)
     rangeExpansionMultiplier: number;
