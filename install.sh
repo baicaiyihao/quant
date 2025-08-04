@@ -54,7 +54,7 @@ install_pm2() {
     print_status "检查 PM2 是否已安装..."
     if ! command -v pm2 &> /dev/null; then
         print_status "安装 PM2..."
-        npm install -g pm2
+        npm install pm2
         if [ $? -eq 0 ]; then
             print_success "PM2 安装成功"
         else
