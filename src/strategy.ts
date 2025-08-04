@@ -39,6 +39,8 @@ export class Strategy {
     private mainnetConfig: any = null; // 缓存配置
     private consecutiveBreakCount: number = 0; // 连续突破计数器，用于指数退避
     private lastBreakTime: number = 0; // 最后突破时间戳，用于10分钟冷却
+    private isRunning: boolean = false; // 策略运行状态
+    private stopRequested: boolean = false; // 停止请求标志
 
 
     constructor(endpoint: string, privateKey: string, poolId: string, g: number, strategyConfig?: Partial<StrategyConfig>) {
@@ -70,7 +72,9 @@ export class Strategy {
             logger.info(`奖励监测配置: ${rewardsConfig}`);
         }
         
-
+        // 默认启动策略
+        this.isRunning = true;
+        this.stopRequested = false;
     }
 
     // 获取配置 - 无限重试直到成功
@@ -1747,11 +1751,37 @@ export class Strategy {
         const intervalMs = parseInt(process.env.STRATEGY_INTERVAL_MS || '10000');
         console.log(`使用间隔时间: ${intervalMs}ms`);
         
+        this.isRunning = true;
+        this.stopRequested = false;
+        
         // noinspection InfiniteLoopJS
-        while (true) { // 无限循环
+        while (!this.stopRequested) { // 检查停止请求
             await this.core(); // 等待 fetchData 完成
-            await new Promise(resolve => setTimeout(resolve, intervalMs));
+            if (!this.stopRequested) {
+                await new Promise(resolve => setTimeout(resolve, intervalMs));
+            }
         }
+        
+        this.isRunning = false;
+        logger.info("策略已停止");
+    }
+
+    /**
+     * 停止策略
+     */
+    stop() {
+        this.stopRequested = true;
+        logger.info("收到停止请求，将在当前循环结束后停止");
+    }
+
+    /**
+     * 获取策略运行状态
+     */
+    getStatus() {
+        return {
+            isRunning: this.isRunning,
+            stopRequested: this.stopRequested
+        };
     }
 
     // 小数位处理

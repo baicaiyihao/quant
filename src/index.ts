@@ -3,6 +3,7 @@ import {config} from "dotenv"
 import {logger} from "./Logger";
 import {StrategyConfig} from "./strategy-config";
 import {getRPCLoadBalancer} from "./rpc-balancer";
+import {startServer, setStrategyInstance} from "./server";
 
 config();
 
@@ -54,8 +55,23 @@ async function main() {
 
     // 传递空字符串作为endpoint参数，因为现在使用负载均衡器
     const st = new Strategy("https://fullnode.mainnet.sui.io:443", private_key, poolId, Number(g), strategyConfig);
-    await st.run();
-
+    
+    // 设置策略实例到服务器
+    setStrategyInstance(st);
+    
+    // 启动HTTP服务器
+    startServer();
+    
+    // 自动启动策略
+    st.run().catch((error: any) => {
+        logger.error('策略运行出错:', error);
+    });
+    
+    logger.info("系统已启动，策略已自动启动...");
+    logger.info("使用以下API接口控制策略:");
+    logger.info("  curl -X POST http://localhost:8080/start  # 启动策略");
+    logger.info("  curl -X POST http://localhost:8080/stop   # 停止策略");
+    logger.info("  curl http://localhost:8080/status         # 查看状态");
 }
 
 main();
