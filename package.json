@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
-    "start": "npm install && tsc && node dist/index.js",
+    "start": "npm install && tsc && node dist/server.js",
     "clean": "rm -rf dist",
     "test-rewards": "ts-node test-rewards-config.ts",
     "pm2:start": "pm2 start ecosystem.config.js",
