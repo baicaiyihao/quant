@@ -22,15 +22,15 @@ print_warning() {
 }
 
 # 检查应用是否在运行
-if pm2 list | grep -q "bluequant"; then
+if npx pm2 list | grep -q "bluequant"; then
     print_status "停止应用..."
-    pm2 stop bluequant
+    npx pm2 stop bluequant
     
     if [ $? -eq 0 ]; then
         print_success "应用已停止！"
         echo ""
         echo "📊 当前状态:"
-        pm2 status
+        npx pm2 status
     else
         echo "❌ 停止应用失败"
         exit 1
