@@ -52,7 +52,11 @@ check_npm() {
 # 安装 PM2
 install_pm2() {
     print_status "检查 PM2 是否已安装..."
-    if ! command -v pm2 &> /dev/null; then
+    # 使用 npx 检查 pm2 是否可用
+    if npx pm2 -v &> /dev/null; then
+        PM2_VERSION=$(npx pm2 -v)
+        print_success "PM2 已安装，版本: $PM2_VERSION"
+    else
         print_status "安装 PM2..."
         npm install pm2
         if [ $? -eq 0 ]; then
@@ -61,9 +65,6 @@ install_pm2() {
             print_error "PM2 安装失败"
             exit 1
         fi
-    else
-        PM2_VERSION=$(pm2 -v)
-        print_success "PM2 已安装，版本: $PM2_VERSION"
     fi
 }
 
@@ -117,11 +118,11 @@ start_application() {
     print_status "启动应用..."
     
     # 检查是否已经在运行
-    if pm2 list | grep -q "bluequant"; then
+    if npx pm2 list | grep -q "bluequant"; then
         print_warning "应用已在运行，正在重启..."
-        pm2 restart bluequant
+        npx pm2 restart bluequant
     else
-        pm2 start ecosystem.config.js
+        npx pm2 start ecosystem.config.js
     fi
     
     if [ $? -eq 0 ]; then
@@ -135,7 +136,7 @@ start_application() {
 # 保存 PM2 配置
 save_pm2_config() {
     print_status "保存 PM2 配置..."
-    pm2 save
+    npx pm2 save
     if [ $? -eq 0 ]; then
         print_success "PM2 配置已保存"
     else
@@ -147,10 +148,10 @@ save_pm2_config() {
 show_status() {
     echo ""
     print_status "显示应用状态..."
-    pm2 status
+    npx pm2 status
     echo ""
     print_status "显示应用日志..."
-    pm2 logs bluequant --lines 10
+    npx pm2 logs bluequant --lines 10
 }
 
 # 显示使用说明
@@ -193,7 +194,7 @@ main() {
     install_pm2
     install_dependencies
     create_directories
-    check_env
+    # check_env
     build_project
     start_application
     save_pm2_config
