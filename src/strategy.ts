@@ -1866,10 +1866,10 @@ export class Strategy {
             
             // 检查当前总收益价值是否达到阈值
             if (totalRewardValue/totalRewardThreshold < parseFloat(process.env.REWARD_RATIO_THRESHOLD || '0.3')) {
-                logger.info(`✅ 总收益价值检查通过: $${totalRewardValue.toFixed(2)} >= $${totalRewardThreshold}`);
+                logger.info(`✅ 总收益价值检查通过: $${totalRewardValue.toFixed(2)} / $${totalRewardThreshold} < ${parseFloat(process.env.REWARD_RATIO_THRESHOLD || '0.3')}`);
                 return true;
             } else {
-                logger.info(`❌ 总收益价值检查未通过: $${totalRewardValue.toFixed(2)} < $${totalRewardThreshold}`);
+                logger.info(`❌ 总收益价值检查未通过: $${totalRewardValue.toFixed(2)} / $${totalRewardThreshold} >= ${parseFloat(process.env.REWARD_RATIO_THRESHOLD || '0.3')}`);
                 return false;
             }
             
