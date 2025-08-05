@@ -1,187 +1,228 @@
-# BlueQuant - Advanced RPC Load Balancer
+# 量化
 
-## 功能特性
+## 运行环境&部署
 
-### 🚀 高级负载均衡策略
-- **平滑加权轮询 (Smooth Weighted Round Robin)**: 默认策略，根据权重分配请求，避免传统加权轮询的突发性
-- **轮询 (Round Robin)**: 简单的轮询分配
-- **最少连接 (Least Connections)**: 选择当前连接数最少的端点
-- **响应时间优先 (Response Time)**: 选择响应时间最短的端点
-- **随机选择 (Random)**: 随机选择端点
+本机环境需要安装
 
-### 📊 智能监控
-- **实时响应时间监控**: 使用指数移动平均计算平均响应时间
-- **成功率统计**: 跟踪每个端点的成功/失败率
-- **健康检查**: 定期检查端点可用性
-- **自动故障恢复**: 指数退避机制，自动恢复故障端点
+1. 安装`node.js` [>安装Node链接](https://nodejs.org/zh-cn/download/package-manager)
+2. 执行`npm install -g typescript`
+3. 需要使用一个稳定的RPC节点，不要使用默认的，那个不稳定
 
-### 🔧 配置灵活
-- **权重配置**: 支持通过环境变量设置端点权重
-- **策略切换**: 运行时动态切换负载均衡策略
-- **详细监控**: 提供端点和整体性能指标
+## 启动方式
+
+在启动程序之前，必须先配置好配置文件，在项目路径下新建一个文件`.env`示例文件如下：
+
+```.dotenv
+
+# 钱包私钥 需要替换
+PRIVATE_KEY="你的私钥"
+
+# Sui节点URL，支持多个RPC端点进行负载均衡
+ENDPPOINT="https://go.getblock.io/fb5b37a5687249e089aa7c21e2ea10"
+ENDPPOINT1="https://another-rpc-endpoint.com"
+ENDPPOINT2="https://third-rpc-endpoint.com"
+# 可以继续添加更多端点 ENDPPOINT3, ENDPPOINT4 等
+
+# 目标交易POLL地址，仅测试，具体POOL自己筛选
+POOL_ID="0x9b1a3eb1538cbb0402b009e4e2e39aecd4d97dbe80791c5c1fb6644b0bff2688"
+
+# 默认偏移量,即在计算区间之上再加上G作为最终目标区间，设置为0即可，波动大换成其他正整数
+G=0
+
+# 策略配置参数（可选）
+# 资金使用率 (0-1之间，默认0.9表示90%)
+FUND_USAGE_RATE=0.9
+
+# 最小区间倍数 (相对于tickSpacing的倍数，默认3表示3*tickSpacing)
+MIN_RANGE_MULTIPLIER=90
+
+# 滑点设置 (0-1之间，默认0.05表示5%)
+SLIPPAGE=0.05
+
+# 配平误差 (0-1之间，默认0.1表示10%)
+BALANCE_ERROR=0.1
+```
+
+### RPC端点负载均衡说明
+
+系统现在支持多个RPC端点进行负载均衡，具有以下特性：
+
+1. **自动轮询**: 系统会自动轮换使用配置的RPC端点
+2. **失败检测**: 当某个端点连续失败3次后，会自动停用该端点
+3. **指数退避**: 停用的端点会使用指数退避算法逐步增加重试间隔
+4. **自动恢复**: 当退避时间到达后，端点会自动重新激活
+5. **故障转移**: 当前端点失败时，会立即切换到下一个可用端点
+
+配置文件完成后，你需要在你的钱包中充值一部分资产，具体跟你选择的Pool有关，比如池子`A/B`，那么你需要至少任意一种资产（`A`或者`B`）不小于0。
+
+- 使用Makefile文件启动
+
+```shell
+# Linux环境
+make start
+```
+
+- 或者使用node
+
+```shell
+npm install && tsc && node dist/index.js
+```
+
+## 策略说明
+
+程序将自动跟随价格波动进行开仓和平仓，当奖励占比小于手续费占比时，不建议使用本策略。
+# 配置参数说明
 
 ## 环境变量配置
 
-### 基本配置
+在项目根目录创建 `.env` 文件，包含以下配置：
+
 ```bash
-# 单个端点
-ENDPPOINT=https://sui-mainnet.blockvision.org
+# 必需配置
+PRIVATE_KEY="你的私钥"
 
-# 多个端点（支持权重）
-ENDPPOINT=https://sui-mainnet.blockvision.org:3
-ENDPPOINT1=https://sui-mainnet-rpc.allthatnode.com:2
-ENDPPOINT2=https://sui-mainnet-rpc.nodereal.io:1
+# 多个RPC端点配置（负载均衡）
+ENDPPOINT="https://your-primary-sui-rpc-endpoint"
+ENDPPOINT1="https://your-backup-sui-rpc-endpoint"
+ENDPPOINT2="https://your-third-sui-rpc-endpoint"
+# 可继续添加更多...
+
+POOL_ID="目标池子地址"
+G=0
+
+# 可选策略配置
+FUND_USAGE_RATE=0.9
+MIN_RANGE_MULTIPLIER=3
+SLIPPAGE=0.05
+BALANCE_ERROR=0.1
 ```
 
-### 权重说明
-- 权重格式：`url:weight`
-- 权重越高，分配到的请求越多
-- 默认权重为1
-- 最小权重为1
+## 配置参数详解
 
-## 使用示例
+### 必需参数
 
-### 基本使用
-```typescript
-import { createBalancedSuiClient } from './src/rpc-balancer';
+- **PRIVATE_KEY**: 钱包私钥
+- **ENDPPOINT**: 主要Sui RPC节点地址
+- **ENDPPOINT1, ENDPPOINT2, ...**: 备用RPC节点地址（可选，建议配置多个以提高稳定性）
+- **POOL_ID**: 目标交易池地址
+- **G**: 偏移量参数，控制开仓区间的偏移
 
-// 使用默认策略（平滑加权轮询）
-const client = createBalancedSuiClient();
+### RPC负载均衡配置
 
-// 获取账户余额
-const balance = await client.getBalance({
-    owner: "0x...",
-    coinType: "0x2::sui::SUI"
-});
+系统会自动检测所有以 `ENDPPOINT` 开头的环境变量：
+- `ENDPPOINT`: 主要端点
+- `ENDPPOINT1`: 第一个备用端点
+- `ENDPPOINT2`: 第二个备用端点
+- 依此类推...
+
+建议配置至少2-3个不同的RPC端点以确保系统稳定性。
+
+### 可选策略参数
+
+#### FUND_USAGE_RATE (资金使用率)
+- **类型**: 数值 (0-1)
+- **默认值**: 0.9 (90%)
+- **说明**: 控制开仓时使用的资金比例
+- **示例**: 
+  - `0.8` = 使用80%的资金
+  - `0.95` = 使用95%的资金
+
+#### MIN_RANGE_MULTIPLIER (最小区间倍数)
+- **类型**: 数值 (>0)
+- **默认值**: 3
+- **说明**: 控制开仓区间的最小范围，相对于tickSpacing的倍数
+- **示例**:
+  - `2` = 最小区间为2*tickSpacing
+  - `5` = 最小区间为5*tickSpacing
+
+#### SLIPPAGE (滑点设置)
+- **类型**: 数值 (0-1)
+- **默认值**: 0.05 (5%)
+- **说明**: 交易时的滑点容忍度
+- **示例**:
+  - `0.03` = 3%滑点
+  - `0.1` = 10%滑点
+
+#### BALANCE_ERROR (配平误差)
+- **类型**: 数值 (0-1)
+- **默认值**: 0.1 (10%)
+- **说明**: 资产配平时的误差容忍度
+- **示例**:
+  - `0.05` = 5%误差
+  - `0.15` = 15%误差
+
+## 配置建议
+
+### 保守策略
+```bash
+FUND_USAGE_RATE=0.8
+MIN_RANGE_MULTIPLIER=5
+SLIPPAGE=0.03
+BALANCE_ERROR=0.05
 ```
 
-### 指定策略
-```typescript
-import { createBalancedSuiClient, getRPCLoadBalancer } from './src/rpc-balancer';
-
-// 使用响应时间优先策略
-const client = createBalancedSuiClient('response_time');
-
-// 或者动态切换策略
-const balancer = getRPCLoadBalancer();
-balancer.setStrategy('least_connections');
+### 激进策略
+```bash
+FUND_USAGE_RATE=0.95
+MIN_RANGE_MULTIPLIER=2
+SLIPPAGE=0.1
+BALANCE_ERROR=0.15
 ```
 
-### 监控和状态
-```typescript
-import { getRPCLoadBalancer } from './src/rpc-balancer';
-
-const balancer = getRPCLoadBalancer();
-
-// 获取详细状态
-const status = balancer.getStatus();
-console.log('Load Balancer Status:', status);
-
-// 获取性能指标
-const metrics = balancer.getMetrics();
-console.log('Performance Metrics:', metrics);
+### 平衡策略
+```bash
+FUND_USAGE_RATE=0.9
+MIN_RANGE_MULTIPLIER=3
+SLIPPAGE=0.05
+BALANCE_ERROR=0.1
 ```
 
-## 负载均衡策略详解
+## 注意事项
 
-### 1. 平滑加权轮询 (weighted_round_robin)
-- **算法**: 平滑加权轮询算法，避免传统加权轮询的突发性
-- **适用场景**: 端点性能差异较大，需要按权重分配负载
-- **优势**: 分配更均匀，避免突发流量
+1. 所有数值参数都应该是有效的数字
+2. 资金使用率不应超过1.0
+3. 滑点和配平误差建议保持在合理范围内
+4. 最小区间倍数建议不小于1
+5. 修改配置后需要重启程序才能生效
+6. **强烈建议配置多个RPC端点以提高系统稳定性和容错能力**
 
-### 2. 轮询 (round_robin)
-- **算法**: 简单的轮询分配
-- **适用场景**: 端点性能相近，需要均匀分配
-- **优势**: 实现简单，分配均匀
 
-### 3. 最少连接 (least_connections)
-- **算法**: 选择当前请求数最少的端点
-- **适用场景**: 端点处理能力差异较大
-- **优势**: 负载分配更均衡
 
-### 4. 响应时间优先 (response_time)
-- **算法**: 选择平均响应时间最短的端点
-- **适用场景**: 对响应时间敏感的应用
-- **优势**: 优先使用性能最好的端点
-
-### 5. 随机选择 (random)
-- **算法**: 随机选择端点
-- **适用场景**: 简单的负载分散
-- **优势**: 实现简单，避免热点
-
-## 监控指标
-
-### 端点状态
-```typescript
-{
-  url: string,
-  isActive: boolean,
-  isHealthy: boolean,
-  weight: number,
-  currentWeight: number,
-  failureCount: number,
-  backoffDelay: number,
-  responseTime: number,
-  successRate: string,
-  totalRequests: number,
-  successCount: number,
-  timeSinceLastFailure: number | null
-}
+DEEP/SUI
 ```
+# 钱包私钥 需要替换
+# PRIVATE_KEY="suiprivkey1qzja3y8jjwqsusrvflp3xf5wtakdsx"
 
-### 整体指标
-```typescript
-{
-  avgResponseTime: number,
-  totalRequests: number,
-  totalSuccess: number,
-  overallSuccessRate: string,
-  activeEndpointCount: number
-}
-```
+# Sui节点URL，替换成你的
+ENDPPOINT="https://go.getblock.io/fb5b37a5687c21e2ea0"
 
-## 故障处理机制
 
-### 自动故障检测
-- 连续失败3次后自动禁用端点
-- 指数退避重试机制
-- 定期健康检查恢复
+# 目标交易POLL地址，仅测试，具体POOL自己筛选
+POOL_ID="0x1b06371d74082856a1be71760cf49f6a377d050eb57afd017f203e89b09c89a2"
 
-### 故障恢复
-- 端点恢复后自动重新启用
-- 重置失败计数和权重
-- 渐进式恢复策略
+# 默认偏移量,即在计算区间之上再加上G作为最终目标区间，设置为0即可，波动大换成其他正整数
+G=0
 
-## 性能优化
+STRATEGY_INTERVAL_MS=10000
 
-### 响应时间优化
-- 使用指数移动平均计算响应时间
-- 平滑因子为0.1，平衡响应性和稳定性
-- 最大响应时间阈值：10秒
+# 可选策略配置
+FUND_USAGE_RATE=0.99
+# 他的space 是 60,感觉是1%区间
+# 所以我这里的0.5 就是 +-0.5% 左右
+MIN_RANGE_MULTIPLIER=0.5 
+SLIPPAGE=0.025
+BALANCE_ERROR=0.5
 
-### 健康检查
-- 检查间隔：30秒
-- 使用轻量级API调用进行健康检查
-- 并行检查所有端点
+# deep > 1 就收菜
+# deep >0.25 就可以覆盖gas(参考 汇率 1SUI/25 DEEP)
+REWARDS_CONFIG="DEEP>1"
 
-## 最佳实践
+# 允许的最大余额比例偏差，默认50%
+MAX_BALANCE_DEVIATION=0.3  # 设置为30%
 
-1. **权重设置**: 根据端点性能和稳定性设置合理权重
-2. **策略选择**: 根据应用需求选择合适的负载均衡策略
-3. **监控**: 定期检查端点和整体性能指标
-4. **故障处理**: 监控失败率，及时调整配置
+# 最小追加阈值
+MIN_ADD_THRESHOLD=5
 
-## 故障排除
-
-### 常见问题
-1. **无可用端点**: 检查环境变量配置和网络连接
-2. **响应时间过长**: 考虑切换到响应时间优先策略
-3. **成功率低**: 检查端点配置和网络稳定性
-
-### 调试信息
-```typescript
-// 启用详细日志
-const balancer = getRPCLoadBalancer();
-console.log('Status:', balancer.getStatus());
-console.log('Metrics:', balancer.getMetrics());
+# 区间扩大倍数
+RANGE_EXPANSION_MULTIPLIER=2
 ```
