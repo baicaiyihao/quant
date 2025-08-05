@@ -108,8 +108,9 @@ export class Strategy {
     // 获取池子信息 - 无限重试直到成功
     async getPool(poolID: string) {
         let attemptCount = 0;
+        const maxAttempts = 3; // 最大重试次数
         
-        while (true) {
+        while (attemptCount < maxAttempts) {
             attemptCount++;
             let qc = new QueryChain(this.client);
             
@@ -118,9 +119,24 @@ export class Strategy {
                 if (pool) {
                     logger.info(`Successfully got pool data after ${attemptCount} attempts`);
                     return pool;
+                } else {
+                    logger.error(`Pool not found: ${poolID}`);
+                    return null;
                 }
             } catch (e) {
+                const errorMessage = String(e);
                 logger.error(`QueryChain.getPool attempt ${attemptCount} failed: ${e}`);
+                
+                // 检查是否是对象已删除的错误
+                if (errorMessage.includes('deleted') || errorMessage.includes('invalid') || errorMessage.includes('not found')) {
+                    logger.warn(`Pool可能已被删除或无效: ${poolID}`);
+                    return null;
+                }
+                
+                if (attemptCount >= maxAttempts) {
+                    logger.error(`达到最大重试次数，无法获取Pool数据`);
+                    return null;
+                }
             }
             
             // 切换客户端
@@ -130,6 +146,9 @@ export class Strategy {
             // 短暂延迟避免过于频繁的请求
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
+        
+        logger.error(`获取Pool数据失败，已达到最大重试次数`);
+        return null;
     }
 
     /***
@@ -140,8 +159,9 @@ export class Strategy {
         const DECIMALS_SUI = 9
 
         let attemptCount = 0;
+        const maxAttempts = 3; // 最大重试次数
         
-        while (true) {
+        while (attemptCount < maxAttempts) {
             attemptCount++;
             let amountA: number = 0.0;
             let amountB: number = 0.0;
@@ -167,7 +187,19 @@ export class Strategy {
                 logger.info(`Successfully got asset data after ${attemptCount} attempts: A=${amountA}, B=${amountB}, SUI=${amountSUI}`);
                 return [amountA, amountB, amountSUI];
             } catch (e) {
+                const errorMessage = String(e);
                 logger.error(`getAllBalances attempt ${attemptCount} failed: ${e}`);
+                
+                // 检查是否是对象已删除的错误
+                if (errorMessage.includes('deleted') || errorMessage.includes('invalid') || errorMessage.includes('not found')) {
+                    logger.warn(`用户资产可能已被删除或无效`);
+                    return [0, 0, 0]; // 返回零余额
+                }
+                
+                if (attemptCount >= maxAttempts) {
+                    logger.error(`达到最大重试次数，无法获取资产数据`);
+                    return null;
+                }
             }
             
             // 切换客户端
@@ -177,6 +209,9 @@ export class Strategy {
             // 短暂延迟避免过于频繁的请求
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
+        
+        logger.error(`获取资产数据失败，已达到最大重试次数`);
+        return null;
     }
 
     /**
@@ -185,8 +220,9 @@ export class Strategy {
      */
     async getUserPositions(userAddress: string) {
         let attemptCount = 0;
+        const maxAttempts = 3; // 最大重试次数
         
-        while (true) {
+        while (attemptCount < maxAttempts) {
             attemptCount++;
             let qc = new QueryChain(this.client);
             const config = await this.getConfig();
@@ -196,9 +232,24 @@ export class Strategy {
                 if (positions) {
                     logger.info(`Successfully got user positions after ${attemptCount} attempts`);
                     return positions;
+                } else {
+                    logger.info(`No positions found for user`);
+                    return [];
                 }
             } catch (e) {
+                const errorMessage = String(e);
                 logger.error(`QueryChain.getUserPositions attempt ${attemptCount} failed: ${e}`);
+                
+                // 检查是否是对象已删除的错误
+                if (errorMessage.includes('deleted') || errorMessage.includes('invalid') || errorMessage.includes('not found')) {
+                    logger.warn(`用户仓位可能已被删除或无效`);
+                    return [];
+                }
+                
+                if (attemptCount >= maxAttempts) {
+                    logger.error(`达到最大重试次数，无法获取用户仓位`);
+                    return null;
+                }
             }
             
             // 切换客户端
@@ -208,6 +259,9 @@ export class Strategy {
             // 短暂延迟避免过于频繁的请求
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
+        
+        logger.error(`获取用户仓位失败，已达到最大重试次数`);
+        return null;
     }
 
     /***
@@ -761,7 +815,15 @@ export class Strategy {
                 return false;
             }
         } catch (e) {
+            const errorMessage = String(e);
             logger.error(`Close Position Failed: ${e}`);
+            
+            // 检查是否是对象已删除的错误
+            if (errorMessage.includes('deleted') || errorMessage.includes('invalid') || errorMessage.includes('not found')) {
+                logger.warn(`仓位对象可能已被删除或无效，无法关闭仓位`);
+                return true; // 如果仓位已经不存在，认为关闭成功
+            }
+            
             return false;
         }
     }
@@ -1316,13 +1378,18 @@ export class Strategy {
      */
     async getPositionFeeAndRewards(position: IPosition, pool: Pool) {
         let attemptCount = 0;
+        const maxAttempts = 3; // 最大重试次数
         
-        while (true) {
+        while (attemptCount < maxAttempts) {
             attemptCount++;
             try {
                 const config = await this.getConfig();
                 if (!config || !config.contractConfig) {
                     logger.error(`获取仓位费用和奖励失败: 配置无效`);
+                    if (attemptCount >= maxAttempts) {
+                        logger.error(`达到最大重试次数，放弃获取费用和奖励`);
+                        return null;
+                    }
                     // 切换客户端并重试
                     this.client = createBalancedSuiClient();
                     logger.info(`Switched client for feeAndRewards attempt ${attemptCount + 1}`);
@@ -1384,7 +1451,19 @@ export class Strategy {
                     return null;
                 }
             } catch (e) {
+                const errorMessage = String(e);
                 logger.error(`获取仓位费用和奖励 attempt ${attemptCount} failed: ${e}`);
+                
+                // 检查是否是对象已删除的错误
+                if (errorMessage.includes('deleted') || errorMessage.includes('invalid')) {
+                    logger.warn(`仓位对象可能已被删除或无效，跳过费用和奖励检查`);
+                    return null;
+                }
+                
+                if (attemptCount >= maxAttempts) {
+                    logger.error(`达到最大重试次数，放弃获取费用和奖励`);
+                    return null;
+                }
             }
             
             // 切换客户端
@@ -1394,6 +1473,9 @@ export class Strategy {
             // 短暂延迟避免过于频繁的请求
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
+        
+        logger.error(`获取仓位费用和奖励失败，已达到最大重试次数`);
+        return null;
     }
 
     /**
