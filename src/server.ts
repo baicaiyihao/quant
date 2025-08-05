@@ -2,6 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import { logger } from './Logger';
 import { getEnvConfig } from './config';
+import {config} from "dotenv"
+
+config();
 
 const app = express();
 const envConfig = getEnvConfig();

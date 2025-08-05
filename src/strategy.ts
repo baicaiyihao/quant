@@ -396,51 +396,8 @@ export class Strategy {
         logger.info(`CurrentPrice: ${currentPrice} ||Price Range:  ${lowerTickPrice} <--> ${upperTickPrice}`);
         const [x, y] = this.calXY(lowerTick, upperTick, currentSqrtPrice)
         logger.info(`x:y = ${x}:${y}`);
-        // 配平前钱包资产信息
-        const result = await this.getAssert();
-        if (result === null) {
-            logger.error("获取资金信息异常 => PASS");
-            return;
-        }
-        const [balanceA, balanceB, balanceSUI] = result as number[];
-        logger.info(`配平前钱包资产: ${this.nameA}: ${balanceA} | ${this.nameB}: ${balanceB} SUI: ${balanceSUI}`);
-        const [a2b, amount] = this.calSwap(currentPrice, x, y, balanceA, balanceB, strategyConfig.balanceError);
-        logger.info(`a2b: ${a2b} amount: ${amount}`);
-        // return;
-
-        if (amount > 0) {
-            logger.info(`正在配平 => Swap`);
-            
-            // 在配平前进行价格检查
-            const swapValue = await this.calculateSwapValue(pool, a2b, amount);
-            if (swapValue < 10) {
-                logger.warn(`🚫 开仓配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
-                logger.info(`跳过配平，尝试直接开仓`);
-            } else {
-                logger.info(`✅ 开仓配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
-                let swapSuccess = false;
-                
-                try {
-                    const swapOK = await this.toSwap(pool, a2b, amount, strategyConfig.slippage)
-                    if (swapOK) {
-                        logger.info(`Swap success => 去开仓`);
-                        swapSuccess = true;
-                    } else {
-                        logger.error(`Swap fail => 尝试直接开仓`);
-                        swapSuccess = false;
-                    }
-                } catch (swapError) {
-                    logger.error(`Swap error: ${swapError} => 尝试直接开仓`);
-                    swapSuccess = false;
-                }
-                
-                if (!swapSuccess) {
-                    logger.warn(`配平失败，尝试直接开仓`);
-                }
-            }
-        }
-
-        // 开仓
+        
+        // 先尝试开仓
         logger.info(`开始开仓 => AddLiquidity`);
         try {
             const addLiquidityOK = await this.toAddLiquidity(lowerTick, upperTick);
@@ -448,11 +405,72 @@ export class Strategy {
                 logger.info(`开仓成功 => 重置连续突破计数器`);
                 this.consecutiveBreakCount = 0; // 开仓成功后重置连续突破计数器
                 this.lastBreakTime = 0; // 重置最后突破时间
+                
+                // 开仓成功后，检查是否需要配平资金
+                logger.info(`开仓成功，检查是否需要配平资金...`);
+                await this.checkAndBalanceAfterOpen(pool, currentPrice, x, y);
+                
             } else {
                 logger.error(`开仓失败`);
             }
         } catch (addLiquidityError) {
             logger.error(`开仓异常: ${addLiquidityError}`);
+        }
+    }
+
+    /**
+     * 开仓后检查并配平资金
+     * @param pool 池子信息
+     * @param currentPrice 当前价格
+     * @param x 目标代币A数量
+     * @param y 目标代币B数量
+     */
+    async checkAndBalanceAfterOpen(pool: Pool, currentPrice: number, x: number, y: number) {
+        try {
+            // 等待一段时间让开仓交易确认
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // 重新获取钱包资产信息
+            const result = await this.getAssert();
+            if (result === null) {
+                logger.error("获取资金信息异常 => 跳过配平");
+                return;
+            }
+            
+            const [balanceA, balanceB, balanceSUI] = result as number[];
+            logger.info(`开仓后钱包资产: ${this.nameA}: ${balanceA} | ${this.nameB}: ${balanceB} SUI: ${balanceSUI}`);
+            
+            const strategyConfig = getStrategyConfig();
+            const [a2b, amount] = this.calSwap(currentPrice, x, y, balanceA, balanceB, strategyConfig.balanceError);
+            logger.info(`配平计算: a2b=${a2b}, amount=${amount}`);
+            
+            if (amount > 0) {
+                logger.info(`开仓后需要配平 => Swap`);
+                
+                // 在配平前进行价格检查
+                const swapValue = await this.calculateSwapValue(pool, a2b, amount);
+                if (swapValue < 10) {
+                    logger.warn(`🚫 开仓后配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+                    logger.info(`跳过配平`);
+                } else {
+                    logger.info(`✅ 开仓后配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+                    
+                    try {
+                        const swapOK = await this.toSwap(pool, a2b, amount, strategyConfig.slippage)
+                        if (swapOK) {
+                            logger.info(`开仓后配平成功`);
+                        } else {
+                            logger.error(`开仓后配平失败`);
+                        }
+                    } catch (swapError) {
+                        logger.error(`开仓后配平异常: ${swapError}`);
+                    }
+                }
+            } else {
+                logger.info(`开仓后资金配比合理，无需配平`);
+            }
+        } catch (error) {
+            logger.error(`开仓后配平检查失败: ${error}`);
         }
     }
 
@@ -1039,16 +1057,11 @@ export class Strategy {
         return;
         }
 
-        // 检查是否有新余额需要加入现有仓位
-        if (poss.length > 0) {
-            logger.info(`检查是否需要为现有仓位追加流动性...`);
-            await this.checkAndAddToExistingPosition(poss[0], pool);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
 
         // 仓位检测和平仓
         for (const pos of poss) {
-            await this.checkPos(pos, pool)
+            // 首先检查仓位是否需要关闭（基于价格突破）
+            await this.checkPos(pos, pool);
             
             // 检查并显示仓位费用和奖励信息
             logger.info(`=== 检查仓位 ${pos.position_id} 的费用和奖励信息 ===`);
@@ -1072,13 +1085,15 @@ export class Strategy {
                 }
             }
             
-            // 检查奖励重开条件
+            // 然后检查是否需要关闭仓位（基于奖励阈值）
+            let shouldClosePosition = false;
             if (feeAndRewards) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 const shouldReopen = await this.checkRewardsThreshold(feeAndRewards);
                 
                 if (shouldReopen) {
                     logger.info(`🎯 手续费+奖励满足重开条件，准备重开仓位`);
+                    shouldClosePosition = true;
                     
                     // 直接关闭仓位，会自动收集所有fee和rewards
                     const closeSuccess = await this.toClosePos(pool, pos.position_id);
@@ -1096,9 +1111,21 @@ export class Strategy {
                         logger.error(`❌ 关闭仓位失败，无法重开`);
                     }
                 }
-                
-
             }
+            
+            // 只有在不需要关闭仓位的情况下，才检查是否需要追加流动性
+            if (!shouldClosePosition && feeAndRewards && poss.length > 0) {
+                logger.info(`检查是否需要为现有仓位追加流动性...`);
+                const shouldAddLiquidity = await this.checkShouldAddLiquidity(pos, pool, feeAndRewards);
+                
+                if (shouldAddLiquidity) {
+                    await this.checkAndAddToExistingPosition(poss[0], pool);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } else {
+                    logger.info(`跳过追加流动性：收益占比检查未通过或获取收益失败`);
+                }
+            }
+
             
             // 提示可领取的内容（关闭仓位时会自动收集）
             if (hasRewards) {
@@ -1814,7 +1841,176 @@ export class Strategy {
         return false;
     }
 
+    /**
+     * 检查是否应该追加流动性
+     * @param position 仓位信息
+     * @param pool 池子信息
+     * @param feeAndRewards 费用和奖励信息
+     * @returns 是否应该追加流动性
+     */
+    private async checkShouldAddLiquidity(position: IPosition, pool: Pool, feeAndRewards: IFeeAndRewards): Promise<boolean> {
+        try {
+            // 获取环境变量配置的总收益价值阈值，默认100美元
+            const totalRewardThreshold = parseFloat(process.env.TOTAL_REWARD_THRESHOLD || '100');
+            logger.info(`检查追加流动性条件: 总收益价值阈值=$${totalRewardThreshold}`);
+            
+            // 计算当前已获取的总收益价值
+            const totalRewardValue = await this.calculateTotalRewardValue(feeAndRewards);
+            
+            if (totalRewardValue === 0) {
+                logger.warn(`无法计算已获取收益价值，默认执行一次追加流动性`);
+                return true;
+            }
+            
+            logger.info(`当前总收益价值: $${totalRewardValue.toFixed(2)}, 目标阈值: $${totalRewardThreshold}`);
+            
+            // 检查当前总收益价值是否达到阈值
+            if (totalRewardValue >= totalRewardThreshold) {
+                logger.info(`✅ 总收益价值检查通过: $${totalRewardValue.toFixed(2)} >= $${totalRewardThreshold}`);
+                return true;
+            } else {
+                logger.info(`❌ 总收益价值检查未通过: $${totalRewardValue.toFixed(2)} < $${totalRewardThreshold}`);
+                return false;
+            }
+            
+        } catch (error) {
+            logger.error(`检查追加流动性条件失败: ${error}`);
+            logger.warn(`发生错误，默认执行一次追加流动性`);
+            return true;
+        }
+    }
 
+    /**
+     * 计算当前已获取的总收益价值
+     * @param feeAndRewards 费用和奖励信息
+     * @returns 总收益价值（美元）
+     */
+    private async calculateTotalRewardValue(feeAndRewards: IFeeAndRewards): Promise<number> {
+        try {
+            // 合并手续费和奖励
+            const allRewards = [];
+            
+            // 添加手续费
+            if (feeAndRewards.fee) {
+                if (feeAndRewards.fee.coinA && feeAndRewards.fee.coinA.toString() !== '0') {
+                    const feeA = stringToDividedNumber(feeAndRewards.fee.coinA.toString(), this.decimalsA);
+                    if (feeA > 0) {
+                        allRewards.push({
+                            coinType: this.coinA,
+                            coinAmount: feeAndRewards.fee.coinA.toString(),
+                            coinDecimals: this.decimalsA,
+                            coinSymbol: this.nameA
+                        });
+                    }
+                }
+                if (feeAndRewards.fee.coinB && feeAndRewards.fee.coinB.toString() !== '0') {
+                    const feeB = stringToDividedNumber(feeAndRewards.fee.coinB.toString(), this.decimalsB);
+                    if (feeB > 0) {
+                        allRewards.push({
+                            coinType: this.coinB,
+                            coinAmount: feeAndRewards.fee.coinB.toString(),
+                            coinDecimals: this.decimalsB,
+                            coinSymbol: this.nameB
+                        });
+                    }
+                }
+            }
+            
+            // 添加奖励
+            if (feeAndRewards.rewards && feeAndRewards.rewards.length > 0) {
+                allRewards.push(...feeAndRewards.rewards);
+            }
+            
+            if (allRewards.length === 0) {
+                return 0;
+            }
+            
+            // 提取代币地址
+            const tokens = allRewards.map(reward => reward.coinType).filter((token): token is string => token !== null && token !== undefined);
+            
+            if (tokens.length === 0) {
+                return 0;
+            }
+            
+            // 获取代币价格
+            const tokenPrices = await fetchTokenPrices(tokens);
+            
+            if (tokenPrices.length === 0) {
+                return 0;
+            }
+            
+            // 计算总价值
+            const totalValue = calculateTotalRewardPrice(allRewards, tokenPrices);
+            
+            return totalValue;
+            
+        } catch (error) {
+            logger.error(`计算总收益价值失败: ${error}`);
+            return 0;
+        }
+    }
+
+    /**
+     * 计算追加流动性可能产生的收益价值
+     * @param pool 池子信息
+     * @param position 仓位信息
+     * @param amountA 代币A数量
+     * @param amountB 代币B数量
+     * @returns 潜在收益价值（美元）
+     */
+    private async calculatePotentialRewardValue(pool: Pool, position: IPosition, amountA: number, amountB: number): Promise<number> {
+        try {
+            // 基于当前仓位的收益比例，估算追加流动性可能产生的收益
+            // 这里使用一个简化的估算方法：基于追加资金量与现有仓位的比例
+            
+            // 获取当前仓位的流动性信息（这里需要根据实际情况调整）
+            const currentLiquidity = position.liquidity || 1; // 如果没有流动性信息，使用默认值
+            
+            // 计算追加资金的总价值
+            const tokens: string[] = [];
+            if (amountA > 0 && this.coinA) {
+                tokens.push(this.coinA);
+            }
+            if (amountB > 0 && this.coinB) {
+                tokens.push(this.coinB);
+            }
+            
+            if (tokens.length === 0) {
+                return 0;
+            }
+            
+            // 获取代币价格
+            const tokenPrices = await fetchTokenPrices(tokens);
+            
+            if (tokenPrices.length === 0) {
+                return 0;
+            }
+            
+            // 计算追加资金的总价值
+            let totalValue = 0;
+            if (amountA > 0) {
+                const priceA = tokenPrices.find(p => p.address === this.coinA)?.price || '0';
+                totalValue += amountA * parseFloat(priceA);
+            }
+            if (amountB > 0) {
+                const priceB = tokenPrices.find(p => p.address === this.coinB)?.price || '0';
+                totalValue += amountB * parseFloat(priceB);
+            }
+            
+            // 基于追加资金与现有仓位的比例，估算潜在收益
+            // 这里使用一个保守的估算：假设追加资金产生的收益与现有收益成比例
+            const potentialRewardRatio = 0.1; // 假设追加资金产生的收益是追加资金价值的10%
+            const potentialRewardValue = totalValue * potentialRewardRatio;
+            
+            logger.info(`潜在收益估算: 追加资金价值=$${totalValue.toFixed(2)}, 估算收益比例=${potentialRewardRatio * 100}%, 潜在收益=$${potentialRewardValue.toFixed(2)}`);
+            
+            return potentialRewardValue;
+            
+        } catch (error) {
+            logger.error(`计算潜在收益价值失败: ${error}`);
+            return 0;
+        }
+    }
 
     /**
      * 间隔运行核心
