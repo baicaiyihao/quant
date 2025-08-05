@@ -151,6 +151,22 @@ BALANCE_ERROR=0.1
   - `0.05` = 5%误差
   - `0.15` = 15%误差
 
+#### POOL_POSITION_RATIO (Pool仓位比例阈值)
+- **类型**: 数值 (0-1)
+- **默认值**: 0.6 (60%)
+- **说明**: 追加流动性时的配平判断阈值。如果当前pool price的仓位占据总price计算仓位的比例低于此阈值，就执行swap配平，否则直接追加
+- **示例**:
+  - `0.5` = 50%阈值
+  - `0.7` = 70%阈值
+
+#### MIN_SWAP_VALUE (Swap最小价值阈值)
+- **类型**: 数值 (美元)
+- **默认值**: 10 (10美元)
+- **说明**: Swap交易的最小价值阈值，低于此价值的swap交易将被拒绝，避免小额交易造成的损耗
+- **示例**:
+  - `5` = 5美元阈值
+  - `20` = 20美元阈值
+
 ## 配置建议
 
 ### 保守策略
@@ -159,6 +175,8 @@ FUND_USAGE_RATE=0.8
 MIN_RANGE_MULTIPLIER=5
 SLIPPAGE=0.03
 BALANCE_ERROR=0.05
+POOL_POSITION_RATIO=0.7
+MIN_SWAP_VALUE=20
 ```
 
 ### 激进策略
@@ -167,6 +185,8 @@ FUND_USAGE_RATE=0.95
 MIN_RANGE_MULTIPLIER=2
 SLIPPAGE=0.1
 BALANCE_ERROR=0.15
+POOL_POSITION_RATIO=0.5
+MIN_SWAP_VALUE=5
 ```
 
 ### 平衡策略
@@ -175,6 +195,8 @@ FUND_USAGE_RATE=0.9
 MIN_RANGE_MULTIPLIER=3
 SLIPPAGE=0.05
 BALANCE_ERROR=0.1
+POOL_POSITION_RATIO=0.6
+MIN_SWAP_VALUE=10
 ```
 
 ## 注意事项
@@ -185,6 +207,8 @@ BALANCE_ERROR=0.1
 4. 最小区间倍数建议不小于1
 5. 修改配置后需要重启程序才能生效
 6. **强烈建议配置多个RPC端点以提高系统稳定性和容错能力**
+7. **POOL_POSITION_RATIO参数用于控制追加流动性时的配平策略，避免频繁swap造成的损耗**
+8. **MIN_SWAP_VALUE参数用于控制swap交易的最小价值阈值，避免小额交易造成的损耗**
 
 
 

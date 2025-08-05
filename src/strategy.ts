@@ -63,7 +63,7 @@ export class Strategy {
         
         // 打印配置信息
         const config = getStrategyConfig();
-        logger.info(`策略配置: 资金使用率=${config.fundUsageRate * 100}%, 最小区间倍数=${config.minRangeMultiplier}, 滑点=${config.slippage * 100}%, 配平误差=${config.balanceError * 100}%`);
+        logger.info(`策略配置: 资金使用率=${config.fundUsageRate * 100}%, 最小区间倍数=${config.minRangeMultiplier}, 滑点=${config.slippage * 100}%, 配平误差=${config.balanceError * 100}%, Pool仓位比例阈值=${config.poolPositionRatio * 100}%, Swap最小价值阈值=$${config.minSwapValue}`);
         
         // 从环境变量读取奖励配置
         const rewardsConfig = process.env.REWARDS_CONFIG || "";
@@ -441,19 +441,35 @@ export class Strategy {
             logger.info(`开仓后钱包资产: ${this.nameA}: ${balanceA} | ${this.nameB}: ${balanceB} SUI: ${balanceSUI}`);
             
             const strategyConfig = getStrategyConfig();
-            const [a2b, amount] = this.calSwap(currentPrice, x, y, balanceA, balanceB, strategyConfig.balanceError);
-            logger.info(`配平计算: a2b=${a2b}, amount=${amount}`);
+            
+            // 计算当前pool仓位占据总可利用token price的仓位比例
+            // 计算总可利用token的price价值
+            const totalAvailableValue = balanceA * currentPrice + balanceB;
+            
+            // 计算当前pool仓位的price价值（假设pool仓位占用了大部分资金）
+            const poolPositionValue = Math.min(balanceA * currentPrice, balanceB);
+            
+            // 计算pool仓位比例
+            const poolRatio = totalAvailableValue > 0 ? poolPositionValue / totalAvailableValue : 0;
+            
+            logger.info(`开仓后Pool仓位比例计算: 总可利用价值=${totalAvailableValue.toFixed(6)}, Pool仓位价值=${poolPositionValue.toFixed(6)}, 比例=${(poolRatio*100).toFixed(1)}%`);
+            
+            // 使用新的基于pool仓位比例的配平逻辑
+            const [a2b, amount] = this.calSwapByPoolRatio(
+                currentPrice, x, y, balanceA, balanceB, poolRatio, strategyConfig.poolPositionRatio
+            );
+            logger.info(`开仓后配平计算: a2b=${a2b}, amount=${amount}`);
             
             if (amount > 0) {
                 logger.info(`开仓后需要配平 => Swap`);
                 
                 // 在配平前进行价格检查
                 const swapValue = await this.calculateSwapValue(pool, a2b, amount);
-                if (swapValue < 10) {
-                    logger.warn(`🚫 开仓后配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+                if (swapValue < strategyConfig.minSwapValue) {
+                    logger.warn(`🚫 开仓后配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于$${strategyConfig.minSwapValue}美金阈值`);
                     logger.info(`跳过配平`);
                 } else {
-                    logger.info(`✅ 开仓后配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+                    logger.info(`✅ 开仓后配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $${strategyConfig.minSwapValue}`);
                     
                     try {
                         const swapOK = await this.toSwap(pool, a2b, amount, strategyConfig.slippage)
@@ -622,13 +638,14 @@ export class Strategy {
     async toSwap(poolState: Pool, a2b: boolean, amount: number, slippage = 0.05) {
         try {
             // 在swap前进行价格检查
+            const strategyConfig = getStrategyConfig();
             const swapValue = await this.calculateSwapValue(poolState, a2b, amount);
-            if (swapValue < 10) {
-                logger.warn(`🚫 Swap被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+            if (swapValue < strategyConfig.minSwapValue) {
+                logger.warn(`🚫 Swap被拒绝: 交易价值($${swapValue.toFixed(2)})小于$${strategyConfig.minSwapValue}美金阈值`);
                 return false;
             }
             
-            logger.info(`✅ Swap通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+            logger.info(`✅ Swap通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $${strategyConfig.minSwapValue}`);
             
             let iSwapParams: ISwapParams = {
                 pool: poolState,
@@ -753,6 +770,90 @@ export class Strategy {
 
         // 如果没有满足的条件，返回默认值
         return [false, 0];
+    }
+
+    /**
+     * 基于pool仓位比例的配平计算
+     * @param p 当前价格
+     * @param x 目标代币A数量
+     * @param y 目标代币B数量
+     * @param a 当前代币A余额
+     * @param b 当前代币B余额
+     * @param poolRatio 当前pool仓位占据总可利用token price的仓位比例
+     * @param threshold 阈值，默认0.6表示60%
+     * @returns [是否需要swap, swap数量]
+     */
+    calSwapByPoolRatio(p: number, x: number, y: number, a: number, b: number, poolRatio: number, threshold: number = 0.6): [boolean, number] {
+        const k = x / y; // 目标比例 A:B
+        const A = this.nameA;
+        const B = this.nameB;
+
+        logger.info(`Pool仓位比例配平计算: 目标比例k=${k.toFixed(6)}, 当前比例=${(a/b).toFixed(6)}, 价格p=${p.toFixed(6)}, pool仓位比例=${(poolRatio*100).toFixed(1)}%, 阈值=${(threshold*100).toFixed(1)}%`);
+
+        // 如果B资产为0，只能用A换B
+        if (b === 0) {
+            logger.info(`${B} 资产不足, 执行 ${A} => ${B}`);
+            const a2b = true;
+            const n = (a - b * k) / (1 + p * k);
+            const a_ = a - n;
+            const b_ = b + n * p;
+            logger.info(`计算 Swap:${A}->${B},输入转移数量:${n} 配平后 ${a_} ${b_}`);
+            return [a2b, this.round(n, 4)];
+        }
+
+        // 检查pool仓位比例是否低于阈值
+        if (poolRatio < threshold) {
+            logger.info(`Pool仓位比例${(poolRatio*100).toFixed(1)}% < 阈值${(threshold*100).toFixed(1)}%，需要执行swap配平`);
+            
+            // 计算当前比例与目标比例的差异
+            const currentRatio = a / b;
+            const ratioDiff = Math.abs(currentRatio - k);
+            
+            // 如果当前比例接近目标比例，选择较小的swap量
+            if (ratioDiff < k * 0.1) { // 差异小于10%
+                logger.info(`当前比例接近目标比例，执行最小swap量配平`);
+                const minSwapAmount = Math.min(a, b) * 0.1; // 取较小余额的10%作为最小swap量
+                
+                if (currentRatio > k) {
+                    // A过多，A换B
+                    const a2b = true;
+                    const n = Math.min(minSwapAmount, (a - b * k) / (1 + p * k));
+                    logger.info(`执行最小swap: ${A}->${B}, 数量=${n.toFixed(6)}`);
+                    return [a2b, this.round(n, 4)];
+                } else {
+                    // B过多，B换A
+                    const a2b = false;
+                    const n = Math.min(minSwapAmount, (b * k * p - a * p) / (1 + k * p));
+                    logger.info(`执行最小swap: ${B}->${A}, 数量=${n.toFixed(6)}`);
+                    return [a2b, this.round(n, 4)];
+                }
+            } else {
+                // 比例差异较大，执行完整配平
+                if (currentRatio > k) {
+                    // A过多，需要A换B
+                    logger.info(`${B} 资产不足, 执行 ${A} => ${B}`);
+                    const n = (a - b * k) / (1 + p * k);
+                    const a_ = a - n;
+                    const b_ = b + n * p;
+                    const a2b = true;
+                    logger.info(`计算 Swap:${A}->${B},输入转移数量:${n} 配平后 ${a_} ${b_}`);
+                    return [a2b, this.round(n, 4)];
+                } else {
+                    // A不足，需要B换A
+                    logger.info(`${A} 资产不足, 执行 ${B} => ${A}`);
+                    const n = (b * k * p - a * p) / (1 + k * p);
+                    const a_ = a + n / p;
+                    const b_ = b - n;
+                    const a2b = false;
+                    logger.info(`计算 Swap:${B}->${A},输入转移数量:${n} 配平后 ${a_} ${b_}`);
+                    return [a2b, this.round(n, 4)];
+                }
+            }
+        } else {
+            // Pool仓位比例足够，无需配平
+            logger.info(`Pool仓位比例${(poolRatio*100).toFixed(1)}% >= 阈值${(threshold*100).toFixed(1)}%，无需配平，直接追加`);
+            return [false, 0];
+        }
     }
 
     /***
@@ -1180,10 +1281,23 @@ export class Strategy {
             const [x, y] = this.calXY(position.lower_tick, position.upper_tick, pool.current_sqrt_price);
             logger.info(`现有仓位所需比例 x:y = ${x}:${y}`);
             
-            // 检查是否需要配平
+            // 计算当前pool仓位占据总可利用token price的仓位比例
             const currentPrice = TickMath.tickIndexToPrice(currentTick, this.decimalsA, this.decimalsB).toNumber();
-            const [a2b, swapAmount] = this.calSwap(
-                currentPrice, x, y, availableBalanceA, availableBalanceB, strategyConfig.balanceError
+            
+            // 计算总可利用token的price价值
+            const totalAvailableValue = availableBalanceA * currentPrice + availableBalanceB;
+            
+            // 计算当前pool仓位的price价值（假设pool仓位占用了大部分资金）
+            const poolPositionValue = Math.min(availableBalanceA * currentPrice, availableBalanceB);
+            
+            // 计算pool仓位比例
+            const poolRatio = totalAvailableValue > 0 ? poolPositionValue / totalAvailableValue : 0;
+            
+            logger.info(`Pool仓位比例计算: 总可利用价值=${totalAvailableValue.toFixed(6)}, Pool仓位价值=${poolPositionValue.toFixed(6)}, 比例=${(poolRatio*100).toFixed(1)}%`);
+            
+            // 使用新的基于pool仓位比例的配平逻辑
+            const [a2b, swapAmount] = this.calSwapByPoolRatio(
+                currentPrice, x, y, availableBalanceA, availableBalanceB, poolRatio, strategyConfig.poolPositionRatio
             );
             
             // 如果需要配平，先检查配平数量是否达到阈值
@@ -1194,12 +1308,13 @@ export class Strategy {
                     logger.info(`追加流动性前需要配平: ${a2b ? this.nameA + '->' + this.nameB : this.nameB + '->' + this.nameA}, 数量=${swapAmount}`);
                     
                     // 在配平前进行价格检查
+                    const strategyConfig = getStrategyConfig();
                     const swapValue = await this.calculateSwapValue(pool, a2b, swapAmount);
-                    if (swapValue < 10) {
-                        logger.warn(`🚫 追加流动性配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于10美金阈值`);
+                    if (swapValue < strategyConfig.minSwapValue) {
+                        logger.warn(`🚫 追加流动性配平被拒绝: 交易价值($${swapValue.toFixed(2)})小于$${strategyConfig.minSwapValue}美金阈值`);
                         // 跳过配平但继续检查是否可直接追加流动性
                     } else {
-                        logger.info(`✅ 追加流动性配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $10`);
+                        logger.info(`✅ 追加流动性配平通过价格检查: 交易价值$${swapValue.toFixed(2)} >= $${strategyConfig.minSwapValue}`);
                         const swapOK = await this.toSwap(pool, a2b, swapAmount, strategyConfig.slippage);
                         if (!swapOK) {
                             logger.warn("配平失败，但尝试直接追加流动性");

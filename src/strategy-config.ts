@@ -11,6 +11,10 @@ export interface StrategyConfig {
     rewardsConfig: string;
     // 区间扩大倍数 (用于连续突破时的指数退避，默认2)
     rangeExpansionMultiplier: number;
+    // Pool仓位比例阈值 (0-1之间，默认0.6表示60%，如果当前pool price的仓位占据总price计算仓位的60%以下就执行swap)
+    poolPositionRatio: number;
+    // Swap交易最小价值阈值 (美元，默认10表示10美元)
+    minSwapValue: number;
 }
 
 // 默认配置
@@ -20,7 +24,9 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
     slippage: 0.05,            // 5%滑点
     balanceError: 0.1,          // 10%配平误差
     rewardsConfig: "",
-    rangeExpansionMultiplier: 2 // 区间扩大倍数，用于指数退避
+    rangeExpansionMultiplier: 2, // 区间扩大倍数，用于指数退避
+    poolPositionRatio: 0.6,     // 60%pool仓位比例阈值
+    minSwapValue: 10            // 10美元swap最小价值阈值
 };
 
 // 全局配置实例
@@ -59,6 +65,8 @@ export function validateStrategyConfig(config: StrategyConfig): boolean {
         config.fundUsageRate >= 0 && config.fundUsageRate <= 1 &&
         config.minRangeMultiplier > 0 &&
         config.slippage >= 0 && config.slippage <= 1 &&
-        config.balanceError >= 0 && config.balanceError <= 1
+        config.balanceError >= 0 && config.balanceError <= 1 &&
+        config.poolPositionRatio >= 0 && config.poolPositionRatio <= 1 &&
+        config.minSwapValue > 0
     );
 } 

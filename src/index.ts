@@ -25,12 +25,16 @@ async function main() {
     const slippage = process.env.SLIPPAGE ? parseFloat(process.env.SLIPPAGE) : undefined;
     const balanceError = process.env.BALANCE_ERROR ? parseFloat(process.env.BALANCE_ERROR) : undefined;
     const rangeExpansionMultiplier = process.env.RANGE_EXPANSION_MULTIPLIER ? parseFloat(process.env.RANGE_EXPANSION_MULTIPLIER) : undefined;
+    const poolPositionRatio = process.env.POOL_POSITION_RATIO ? parseFloat(process.env.POOL_POSITION_RATIO) : undefined;
+    const minSwapValue = process.env.MIN_SWAP_VALUE ? parseFloat(process.env.MIN_SWAP_VALUE) : undefined;
 
     logger.info(`ENV: fundUsageRate:${fundUsageRate}`);
     logger.info(`ENV: minRangeMultiplier:${minRangeMultiplier}`);
     logger.info(`ENV: slippage:${slippage}`);
     logger.info(`ENV: balanceError:${balanceError}`);
     logger.info(`ENV: rangeExpansionMultiplier:${rangeExpansionMultiplier}`);
+    logger.info(`ENV: poolPositionRatio:${poolPositionRatio}`);
+    logger.info(`ENV: minSwapValue:${minSwapValue}`);
 
     if (!private_key) {
         throw Error(`private_key Is Nan`);
@@ -52,6 +56,8 @@ async function main() {
     if (slippage !== undefined) strategyConfig.slippage = slippage;
     if (balanceError !== undefined) strategyConfig.balanceError = balanceError;
     if (rangeExpansionMultiplier !== undefined) strategyConfig.rangeExpansionMultiplier = rangeExpansionMultiplier;
+    if (poolPositionRatio !== undefined) strategyConfig.poolPositionRatio = poolPositionRatio;
+    if (minSwapValue !== undefined) strategyConfig.minSwapValue = minSwapValue;
 
     // 传递空字符串作为endpoint参数，因为现在使用负载均衡器
     const st = new Strategy("https://fullnode.mainnet.sui.io:443", private_key, poolId, Number(g), strategyConfig);
