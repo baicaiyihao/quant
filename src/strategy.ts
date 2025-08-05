@@ -1850,8 +1850,8 @@ export class Strategy {
      */
     private async checkShouldAddLiquidity(position: IPosition, pool: Pool, feeAndRewards: IFeeAndRewards): Promise<boolean> {
         try {
-            // 获取环境变量配置的总收益价值阈值，默认100美元
-            const totalRewardThreshold = parseFloat(process.env.TOTAL_REWARD_THRESHOLD || '100');
+            // 获取环境变量配置的总收益价值阈值，默认1美元
+            const totalRewardThreshold = parseFloat(process.env.TOTAL_REWARD_THRESHOLD || '1');
             logger.info(`检查追加流动性条件: 总收益价值阈值=$${totalRewardThreshold}`);
             
             // 计算当前已获取的总收益价值
@@ -1865,7 +1865,7 @@ export class Strategy {
             logger.info(`当前总收益价值: $${totalRewardValue.toFixed(2)}, 目标阈值: $${totalRewardThreshold}`);
             
             // 检查当前总收益价值是否达到阈值
-            if (totalRewardValue >= totalRewardThreshold) {
+            if (totalRewardValue/totalRewardThreshold < parseFloat(process.env.REWARD_RATIO_THRESHOLD || '0.3')) {
                 logger.info(`✅ 总收益价值检查通过: $${totalRewardValue.toFixed(2)} >= $${totalRewardThreshold}`);
                 return true;
             } else {
